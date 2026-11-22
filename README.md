@@ -1,8 +1,8 @@
 # RKdev
 
-RKdev 在同一个 `main` 分支维护两件东西：`boot/` 是主线 U-Boot 的公共启动策略，`recovery/` 是 Alpine、Linux 和 Go Web 恢复助手。两者由同一次构建共享布局及环境变量接口。板子的 DTS、Kconfig、引脚、分区偏移和固件来源由外部板包提供；构建一个新板包不需要给 RKdev 增加分支。
+RKdev 是面向 Rockchip 设备的启动与恢复系统，支持 SPI NOR 和 eMMC。`boot/` 提供主线 U-Boot 的启动策略，`recovery/` 提供基于 Linux 和 Alpine 的 Web 恢复助手。设备树、分区布局和外设配置由独立的板包提供。
 
-Linux 使用 `ophub/linux-6.18.y`，U-Boot 使用 `u-boot/u-boot`。精确版本见 [sources.lock](sources.lock)。内核从 ophub 下载并校验归档 SHA-256 和提交；U-Boot 直接从官方仓库取锁定提交。构建不会检出迁移参考仓库。
+Linux 使用 `ophub/linux-6.18.y`，U-Boot 使用 `u-boot/u-boot`。源码版本见 [sources.lock](sources.lock)。官方板包和固件下载见 [RKdev-boards](https://github.com/dqsq2e2/RKdev-boards)。
 
 ## 用外部板包构建
 
@@ -40,7 +40,7 @@ python3 tools/rkdev.py verify --board "$board" --profile emmc \
 - SPI 从板包定义的 NOR 区域加载恢复文件系统；系统写入可用的外部目标盘。
 - eMMC 在同一用户区保留 loader、环境和恢复分区，系统安装进入独立系统区。整盘镜像和浏览器里的恢复升级是两种操作。恢复升级只更新布局允许的引导及恢复区段；安装系统时先标记未完成，写入及读回完成后才允许 U-Boot 扫描 eMMC 系统区。
 - 按键可选恢复、Maskrom 或依据 USB 主机握手分流。没有可用系统时尝试本地恢复，随后按板包的设置进入 Maskrom、RockUSB Loader 或返回串口。Maskrom 属于 BootROM，Loader 由 U-Boot 提供。串口可执行 `rkdevboot recovery`；其他动作取决于板包配置。
-- 恢复网页从本地网络访问 `http://设备IP/`，直接打开，无需网页账号。HTTPS 入口只跳回 HTTP。原有的刷写、引导设置、硬件检测、备份与还原、终端、防火墙和恢复更新仍在网页内。SSH、串口与 HDMI 登录由板包设置。
+- 在本地网络打开 `http://设备IP/` 进入恢复网页，无需网页账号。网页提供刷写、引导设置、硬件检测、备份与还原、终端、防火墙和恢复更新。SSH、串口与 HDMI 登录由板包定义。
 
 接口与位置定义见 [板包契约](docs/board-package.md)。源码和第三方材料见 [来源记录](SOURCES.md)。
 
