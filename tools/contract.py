@@ -216,7 +216,8 @@ def load_board(path, profile):
     root = manifest.resolve().parent
     board = read_json(manifest)
     fields(board, ("schema", "board_id", "revision", "name", "soc", "compatible",
-                   "default_profile", "firmware", "profiles"), ("rootfs_overlay", "rootfs_packages"), "board")
+                   "default_profile", "firmware", "profiles"),
+           ("rootfs_overlay", "rootfs_packages", "rootfs_programs"), "board")
     require(type(board["schema"]) is int and board["schema"] == SCHEMA, "unsupported board schema")
     for key in ("board_id", "revision"):
         require(matches(IDENT, board[key]), f"invalid {key}")
@@ -235,6 +236,13 @@ def load_board(path, profile):
     require(isinstance(packages, list)
             and all(matches(re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+-]*\Z"), p) for p in packages)
             and len(set(packages)) == len(packages), "invalid rootfs_packages")
+    programs = board.get("rootfs_programs", {})
+    require(isinstance(programs, dict), "invalid rootfs_programs")
+    for dest, source_path in programs.items():
+        require(matches(re.compile(r"usr/(?:s)?bin/[A-Za-z0-9][A-Za-z0-9_.+-]*\Z"), dest)
+                and dest not in {"usr/bin/rkdev", "usr/sbin/rkdev-start"},
+                f"invalid rootfs program destination: {dest}")
+        require(path_in(root, source_path).suffix == ".c", f"rootfs program must be C source: {source_path}")
     for name, cfg in board["profiles"].items():
         validate_profile(root, name, cfg)
     name = profile or board["default_profile"]

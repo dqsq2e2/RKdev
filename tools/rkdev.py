@@ -239,6 +239,11 @@ def build_rootfs(args, root, board, cfg, data, stage, modules, kernelrelease, en
     copy_overlay(CORE / "recovery/rootfs", rootfs)
     if "rootfs_overlay" in board:
         copy_overlay(path_in(root, board["rootfs_overlay"], directory=True), rootfs)
+    for dest, source_path in board.get("rootfs_programs", {}).items():
+        target = rootfs / dest
+        target.parent.mkdir(parents=True, exist_ok=True)
+        run([args.cross_compile + "gcc", "-O2", "-static", "-Wall", "-Wextra",
+             "-Werror", "-s", "-o", target, path_in(root, source_path)])
     for path in (rootfs / "init", rootfs / "usr/sbin/rkdev-start"):
         path.chmod(0o755)
     network = rootfs / "etc/rkdev-network"

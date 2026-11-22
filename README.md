@@ -29,6 +29,8 @@ python3 tools/rkdev.py verify --board "$board" --profile emmc \
   --image out/my-board/my-board-v1-emmc-0.1-dev.img
 ```
 
+官方板包的云编译入口在 [RKdev-boards 的 GitHub Actions](https://github.com/dqsq2e2/RKdev-boards/actions)。在 ARM64 Linux 上本机构建也可传 `--cross-compile=`，直接使用本机 GCC。
+
 支持 SPI 的板包用 `--profile spi`。这一步选定镜像及写入介质；Web 会显示实际恢复模式。要分别构建 U-Boot 和内核可执行 `boot`、`kernel`；`prepare` 会生成布局、环境位置和 U-Boot 配置头。开发者可用 `pack` 组装已有组件，用 `verify` 独立验证。
 
 每套镜像有 `.img`、同名 `.json` 和 `SHA256SUMS`。清单记录板型、修订、profile、布局摘要、区段 SHA-256、上游提交与构建信息。Alpine 的软件包版本随指定发行分支仓库更新，构建记录实际安装版本；目前不保证每次构建的字节完全相同。

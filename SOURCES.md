@@ -6,7 +6,7 @@
 | --- | --- |
 | Go/Web 恢复助手 | yifengyou 的 RKDevTool Web，原导入提交 `d0a153b71`；本仓库迁自 PHX 恢复快照 `dc2a6d388d0bcbe9ab97a1fd7d9aecf013965481` 的 `rkdev/`，保留原来的七个页面与资源，替换布局、启动环境和升级流程 |
 | U-Boot 按键及 USB 分流 | Rockchip 主线启动模式代码及 PHX U-Boot 快照 `ecb17469b4ae87e4da67a0742914cd4fb3e06a8b` |
-| U-Boot PCIe 补丁 | dqsq2e2 的 G98 共享 PHY 变更 `96ad8e83c4e` 和 I3588 的共享复位适配；U-Boot 衍生部分沿用文件 SPDX |
+| U-Boot PCIe 补丁 | dqsq2e2 的 G98 共享 PHY 变更 `96ad8e83c4e`，以及可选复位 GPIO 的清理修正；U-Boot 衍生部分沿用文件 SPDX |
 | Lucide CPU 图标 | 随附 [许可证](recovery/app/res/lucide-LICENSE) |
 | xterm.js / addon-fit | `@xterm/xterm@5.5.0` 和 `@xterm/addon-fit@0.10.0`，随附 [上游 MIT 许可证](recovery/app/res/xtermjs-LICENSE) |
 | 系统图标 | 沿用 RKDevTool Web 固件下载页静态资源，对应项目的产品标识 |

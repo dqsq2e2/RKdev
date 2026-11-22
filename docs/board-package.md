@@ -9,6 +9,7 @@
 | 顶层 `firmware.ddr`、`firmware.bl31` | DDR/TPL 和 BL31；每项写 `sha256`，再写 `url`（HTTPS）、`path`（包内相对路径）或 `file`（由 `--firmware-dir` 提供）之一 |
 | `rootfs_overlay` | 可选。附加恢复文件；`/etc/rkdev-modules` 指定启动时加载的模块，`/etc/rkdev-init.d` 可提供板级初始化 |
 | `rootfs_packages` | 可选。在恢复系统的基础 Alpine 软件包之外加装软件包。包名写在数组内，可用于提供板级网络或诊断工具 |
+| `rootfs_programs` | 可选。把 `usr/bin/` 或 `usr/sbin/` 中的目标路径映射到板包内的单文件 C 程序。构建器交叉编译成 ARM64 静态程序，用于板级初始化或守护进程 |
 
 如果 overlay 提供 `/etc/rkdev-network`，公共启动脚本在回环接口和板级初始化就绪后后台运行它，代替对物理 Ethernet 接口逐个启动 DHCP。overlay 可以提供 `/etc/inittab` 设置板上的登录终端；保留 `/usr/sbin/rkdev-start` 与 `/usr/bin/rkdev` 两个公共入口。
 

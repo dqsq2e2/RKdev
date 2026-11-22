@@ -10,6 +10,7 @@
 #include <command.h>
 #include <dm.h>
 #include <dm/device-internal.h>
+#include <dm/lists.h>
 #include <dm/uclass.h>
 #include <dm/uclass-internal.h>
 #include <env.h>
@@ -99,13 +100,24 @@ static struct usb_gadget_driver probe_driver = {
 static bool host_present(void)
 {
 	struct udevice *dev;
+	ofnode node = ofnode_path(RKDEV_USB_NODE);
+	bool temporary = false;
 	bool connected = false;
 	ulong start;
 
-	if (uclass_find_device_by_ofnode(UCLASS_USB_GADGET_GENERIC,
-					ofnode_path(RKDEV_USB_NODE), &dev) ||
-	    device_active(dev) || device_probe(dev))
-		return false;
+	if (uclass_find_device_by_ofnode(UCLASS_USB_GADGET_GENERIC, node, &dev)) {
+		struct udevice *host;
+
+		/* Leave the host bound so USB storage can still boot normally. */
+		if (uclass_find_device_by_ofnode(UCLASS_USB, node, &host) ||
+		    device_active(host) ||
+		    device_bind_driver_to_node(host->parent, "dwc3-generic-peripheral",
+					       "rkdev-otg-probe", node, &dev))
+			return false;
+		temporary = true;
+	}
+	if (device_active(dev) || device_probe(dev))
+		goto unbind;
 
 	seen_setup = false;
 	if (!usb_gadget_register_driver(&probe_driver)) {
@@ -122,6 +134,9 @@ static bool host_present(void)
 		usb_gadget_unregister_driver(&probe_driver);
 	}
 	if (device_remove(dev, DM_REMOVE_NORMAL))
+		return false;
+unbind:
+	if (temporary && device_unbind(dev))
 		return false;
 	return connected;
 }
