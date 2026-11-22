@@ -301,7 +301,8 @@ func handleBootOrder(w http.ResponseWriter, r *http.Request) {
 		if currentLayout.validateOrder(order) != nil {
 			order = currentLayout.BootOrder
 		}
-		jsonOK(w, map[string]any{"vars": vars, "order": order, "available": currentLayout.BootOrder,
+		available := append(slices.Clone(currentLayout.BootOrder), "recovery")
+		jsonOK(w, map[string]any{"vars": vars, "order": order, "available": available,
 			"count": len(vars), "installing": e.values["rkdev_installing"] != ""})
 	case http.MethodPost:
 		var req struct {

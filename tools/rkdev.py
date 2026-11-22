@@ -26,7 +26,7 @@ ROOTFS = {
 }
 ROOT_PACKAGES = (
     "ca-certificates", "e2fsprogs", "e2fsprogs-extra", "gptfdisk", "util-linux",
-    "smartmontools", "iptables", "parted",
+    "smartmontools", "iptables", "parted", "sgdisk",
 )
 
 
@@ -228,13 +228,22 @@ def build_rootfs(args, root, board, cfg, data, stage, modules, kernelrelease, en
     repositories.write_text(repositories.read_text().replace("http://", "https://"))
     resolver = rootfs / "etc/resolv.conf"
     resolver.write_bytes(Path("/etc/resolv.conf").read_bytes())
-    run(["chroot", rootfs, "apk", "add", "--no-cache", *ROOT_PACKAGES])
+    packages = tuple(dict.fromkeys((*ROOT_PACKAGES, *board.get("rootfs_packages", []))))
+    run(["chroot", rootfs, "apk", "add", "--no-cache", *packages])
+    run(["chroot", rootfs, "/bin/sh", "-ec", '''
+        for tool in sgdisk lsblk blockdev blkid partprobe e2fsck debugfs smartctl iptables; do
+            command -v "$tool" >/dev/null || { echo "missing recovery tool: $tool" >&2; exit 1; }
+        done
+    '''])
     resolver.unlink()
     copy_overlay(CORE / "recovery/rootfs", rootfs)
     if "rootfs_overlay" in board:
         copy_overlay(path_in(root, board["rootfs_overlay"], directory=True), rootfs)
     for path in (rootfs / "init", rootfs / "usr/sbin/rkdev-start"):
         path.chmod(0o755)
+    network = rootfs / "etc/rkdev-network"
+    if network.is_file():
+        network.chmod(0o755)
     scripts = rootfs / "etc/rkdev-init.d"
     if scripts.is_dir():
         for script in scripts.iterdir():

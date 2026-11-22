@@ -123,16 +123,19 @@ func (l runtimeLayout) validate() error {
 			}
 		}
 	}
+	if slices.Contains(l.BootOrder, "recovery") {
+		return fmt.Errorf("布局中的启动设备仅能是存储介质")
+	}
 	return l.validateOrder(l.BootOrder)
 }
 
 func (l runtimeLayout) validateOrder(order []string) error {
-	if len(order) == 0 || len(order) > 5 {
+	if len(order) == 0 || len(order) > 6 {
 		return fmt.Errorf("请选择至少一个可用的引导设备")
 	}
 	for i, target := range order {
-		if !slices.Contains([]string{"emmc", "sd", "usb", "nvme", "sata"}, target) ||
-			!slices.Contains(l.BootOrder, target) || slices.Contains(order[:i], target) {
+		storage := slices.Contains([]string{"emmc", "sd", "usb", "nvme", "sata"}, target) && slices.Contains(l.BootOrder, target)
+		if (!storage && target != "recovery") || slices.Contains(order[:i], target) {
 			return fmt.Errorf("不支持或重复的引导设备 %q", target)
 		}
 	}

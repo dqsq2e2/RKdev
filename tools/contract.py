@@ -216,7 +216,7 @@ def load_board(path, profile):
     root = manifest.resolve().parent
     board = read_json(manifest)
     fields(board, ("schema", "board_id", "revision", "name", "soc", "compatible",
-                   "default_profile", "firmware", "profiles"), ("rootfs_overlay",), "board")
+                   "default_profile", "firmware", "profiles"), ("rootfs_overlay", "rootfs_packages"), "board")
     require(type(board["schema"]) is int and board["schema"] == SCHEMA, "unsupported board schema")
     for key in ("board_id", "revision"):
         require(matches(IDENT, board[key]), f"invalid {key}")
@@ -231,6 +231,10 @@ def load_board(path, profile):
         source(root, entry, name)
     if "rootfs_overlay" in board:
         path_in(root, board["rootfs_overlay"], directory=True)
+    packages = board.get("rootfs_packages", [])
+    require(isinstance(packages, list)
+            and all(matches(re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+-]*\Z"), p) for p in packages)
+            and len(set(packages)) == len(packages), "invalid rootfs_packages")
     for name, cfg in board["profiles"].items():
         validate_profile(root, name, cfg)
     name = profile or board["default_profile"]

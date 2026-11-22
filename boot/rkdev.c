@@ -13,6 +13,7 @@
 #include <dm/uclass.h>
 #include <dm/uclass-internal.h>
 #include <env.h>
+#include <malloc.h>
 #include <time.h>
 #include <linux/delay.h>
 #include <linux/usb/gadget.h>
@@ -167,7 +168,28 @@ static const struct {
 	const char *script;
 } targets[] = { RKDEV_TARGETS };
 
-static void boot_system(void)
+static void boot_recovery(void)
+{
+	const char *const names[] = { "kernel_addr_r", "scriptaddr", "fdt_addr_r", "ramdisk_addr_r" };
+	const char *const addrs[] = { RKDEV_RECOVERY_KERNEL_ADDR, "0x00c00000", "0x12000000", "0x12180000" };
+	char *saved[ARRAY_SIZE(names)];
+
+	puts("RKdev: attempting local recovery\n");
+	/* The compressed SPI input must not overlap the bootm output. */
+	for (int i = 0; i < ARRAY_SIZE(names); i++) {
+		const char *value = env_get(names[i]);
+
+		saved[i] = value ? strdup(value) : NULL;
+		env_set(names[i], addrs[i]);
+	}
+	run_command(RKDEV_RECOVERY, 0);
+	for (int i = 0; i < ARRAY_SIZE(names); i++) {
+		env_set(names[i], saved[i]);
+		free(saved[i]);
+	}
+}
+
+static bool boot_system(void)
 {
 	const char *order = layout_env ? env_get("rkdev_targets") : NULL;
 	char local[96], *next;
@@ -176,12 +198,20 @@ static void boot_system(void)
 		(!layout_env || (pending && *pending && strcmp(pending, "0")));
 	char *cursor;
 	unsigned int used = 0;
+	bool tried_recovery = false;
 
 	if (!order || !*order || strlen(order) >= sizeof(local))
 		order = RKDEV_ORDER;
 	strlcpy(local, order, sizeof(local));
 	cursor = local;
 	while ((next = strsep(&cursor, " "))) {
+		if (!strcmp(next, "recovery")) {
+			if (!tried_recovery) {
+				tried_recovery = true;
+				boot_recovery();
+			}
+			continue;
+		}
 		for (int i = 0; i < ARRAY_SIZE(targets); i++) {
 			if (!(used & BIT(i)) && !strcmp(next, targets[i].name)) {
 				used |= BIT(i);
@@ -194,10 +224,13 @@ static void boot_system(void)
 			}
 		}
 	}
+	return tried_recovery;
 }
 
 static int do_rkdevboot(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[])
 {
+	bool tried_recovery = false;
+
 	if (argc == 2) {
 		if (!strcmp(argv[1], "maskrom"))
 			return request_maskrom();
@@ -209,16 +242,9 @@ static int do_rkdevboot(struct cmd_tbl *cmdtp, int flag, int argc, char *const a
 			return CMD_RET_USAGE;
 	}
 	if (request == NORMAL)
-		boot_system();
-	if (request != LOADER) {
-		puts("RKdev: attempting local recovery\n");
-		/* The compressed SPI input must not overlap the bootm output. */
-		env_set("kernel_addr_r", RKDEV_RECOVERY_KERNEL_ADDR);
-		env_set("scriptaddr", "0x00c00000");
-		env_set("fdt_addr_r", "0x12000000");
-		env_set("ramdisk_addr_r", "0x12180000");
-		run_command(RKDEV_RECOVERY, 0);
-	}
+		tried_recovery = boot_system();
+	if (request != LOADER && !tried_recovery)
+		boot_recovery();
 	if (RKDEV_LOADER[0]) {
 		puts("RKdev: RockUSB Loader\n");
 		run_command(RKDEV_LOADER, 0);

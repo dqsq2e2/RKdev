@@ -27,6 +27,22 @@ func testEmmcLayout() runtimeLayout {
 	return l
 }
 
+func TestRecoveryCanBePrioritizedWithoutChangingLayout(t *testing.T) {
+	l := testEmmcLayout()
+	if err := l.validateOrder([]string{"recovery", "emmc", "usb"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, invalid := range [][]string{{"recovery", "recovery"}, {"recovery", "nvme"}} {
+		if l.validateOrder(invalid) == nil {
+			t.Fatalf("invalid boot order was accepted: %v", invalid)
+		}
+	}
+	l.BootOrder = append(l.BootOrder, "recovery")
+	if l.validate() == nil {
+		t.Fatal("v1 image layout accepted a non-storage boot target")
+	}
+}
+
 func TestEnvironmentAccessRejectsFactoryAndOverlappingGPT(t *testing.T) {
 	l := testEmmcLayout()
 	if err := l.validate(); err != nil {

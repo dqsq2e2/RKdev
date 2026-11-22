@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"html/template"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -20,26 +22,25 @@ func TestWholeDiskNames(t *testing.T) {
 	}
 }
 
-func TestWebAuth(t *testing.T) {
-	const token = "0123456789abcdef01234567"
-	handler := webAuth(token, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func TestRecoveryWeb(t *testing.T) {
+	handler := recoveryWeb(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	for _, test := range []struct {
-		name, path, origin, password, method string
-		code                                 int
+		name, path, origin, method, peer, host string
+		code                                   int
 	}{
-		{"missing password", "/", "", "", "GET", 401},
-		{"authenticated reader", "/", "", token, "GET", 204},
-		{"same origin", "/upload", "https://rkdev.local", token, "POST", 204},
-		{"cross origin writer", "/upload", "https://foreign.example", token, "POST", 403},
-		{"cross origin terminal", "/api/terminal", "https://foreign.example", token, "GET", 403},
+		{"old HTTP entry", "/", "", "GET", "192.168.88.100:1234", "192.168.88.1", 204},
+		{"same origin", "/upload", "http://192.168.88.1", "POST", "192.168.88.100:1234", "192.168.88.1", 204},
+		{"cross origin writer", "/upload", "https://foreign.example", "POST", "192.168.88.100:1234", "192.168.88.1", 403},
+		{"cross origin terminal", "/api/terminal", "https://foreign.example", "GET", "192.168.88.100:1234", "192.168.88.1", 403},
+		{"foreign host", "/api/terminal", "http://foreign.example", "GET", "192.168.88.100:1234", "foreign.example", 403},
+		{"remote peer", "/api/terminal", "", "GET", "198.51.100.123:1234", "192.168.88.1", 403},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			r := httptest.NewRequest(test.method, "https://rkdev.local"+test.path, nil)
-			if test.password != "" {
-				r.SetBasicAuth("rkdev", test.password)
-			}
+			ctx := context.WithValue(context.Background(), http.LocalAddrContextKey, &net.TCPAddr{IP: net.ParseIP("192.168.88.1"), Port: 80})
+			r := httptest.NewRequestWithContext(ctx, test.method, "http://"+test.host+test.path, nil)
+			r.RemoteAddr = test.peer
 			r.Header.Set("Origin", test.origin)
 			w := httptest.NewRecorder()
 			handler.ServeHTTP(w, r)
@@ -47,6 +48,19 @@ func TestWebAuth(t *testing.T) {
 				t.Fatalf("status %d, want %d", w.Code, test.code)
 			}
 		})
+	}
+}
+
+func TestLegacyHTTPSRedirect(t *testing.T) {
+	for _, test := range []struct{ input, want string }{
+		{"https://192.168.88.1:443/some-path", "http://192.168.88.1/"},
+		{"https://[fd00::1]:443/", "http://[fd00::1]/"},
+	} {
+		w := httptest.NewRecorder()
+		redirectToHTTP(w, httptest.NewRequest(http.MethodGet, test.input, nil))
+		if w.Code != http.StatusMovedPermanently || w.Header().Get("Location") != test.want {
+			t.Fatalf("%s: got %d %s", test.input, w.Code, w.Header().Get("Location"))
+		}
 	}
 }
 
@@ -62,7 +76,7 @@ func TestWebTemplate(t *testing.T) {
 			t.Fatal(err)
 		}
 		html := output.String()
-		for _, marker := range []string{"Example Board", "vtest", "flash-panel", "boot-panel", "storage-panel", "update-panel", "backup-panel", "firewall-panel", "terminal-panel", "recovery-manifest", "/api/update_check", "/api/update_download", "/api/update_cancel"} {
+		for _, marker := range []string{"Example Board", "vtest", "flash-panel", "boot-panel", "storage-panel", "update-panel", "backup-panel", "firewall-panel", "terminal-panel", ".boot-type-sata .boot-type-badge", "recovery-manifest", "/api/update_check", "/api/update_download", "/api/update_cancel"} {
 			if !strings.Contains(html, marker) {
 				t.Errorf("%s missing %s", profile, marker)
 			}

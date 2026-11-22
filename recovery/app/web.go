@@ -1,33 +1,34 @@
 package main
 
 import (
-	"crypto/subtle"
 	"crypto/tls"
-	"fmt"
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
-	"regexp"
 	"strings"
 	"time"
 )
 
-var loginTokenRE = regexp.MustCompile(`^[a-f0-9]{24}$`)
-
-func webAuth(token string, next http.Handler) http.Handler {
+func recoveryWeb(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
-		user, password, ok := r.BasicAuth()
-		if !ok || user != "rkdev" || subtle.ConstantTimeCompare([]byte(password), []byte(token)) != 1 {
-			w.Header().Set("WWW-Authenticate", `Basic realm="RKdev", charset="UTF-8"`)
-			http.Error(w, "需要串口显示的 RKdev 登录口令", http.StatusUnauthorized)
+		// Recovery intentionally serves the local network without a web login.
+		// Keep the shell and disk APIs off globally routable connections.
+		peer, err := netip.ParseAddrPort(r.RemoteAddr)
+		if err != nil || !localRecoveryAddr(peer.Addr().Unmap()) {
+			http.Error(w, "恢复网页仅供本地网络访问", http.StatusForbidden)
 			return
 		}
-		if r.Method != http.MethodGet || r.URL.Path == "/api/terminal" {
+		if strings.HasPrefix(r.URL.Path, "/api/") || (r.Method != http.MethodGet && r.Method != http.MethodHead) {
+			if !recoveryHost(r) {
+				http.Error(w, "请使用本机地址访问恢复系统", http.StatusForbidden)
+				return
+			}
 			if fetch := r.Header.Get("Sec-Fetch-Site"); fetch != "" && fetch != "same-origin" && fetch != "none" {
 				http.Error(w, "拒绝跨站请求", http.StatusForbidden)
 				return
@@ -35,7 +36,7 @@ func webAuth(token string, next http.Handler) http.Handler {
 			origin := r.Header.Get("Origin")
 			if origin != "" {
 				u, err := url.Parse(origin)
-				if err != nil || u.Scheme != "https" || !strings.EqualFold(u.Host, r.Host) || u.User != nil || u.Path != "" {
+				if err != nil || u.Scheme != "http" || !strings.EqualFold(u.Host, r.Host) || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
 					http.Error(w, "拒绝跨站请求", http.StatusForbidden)
 					return
 				}
@@ -45,39 +46,60 @@ func webAuth(token string, next http.Handler) http.Handler {
 	})
 }
 
+func localRecoveryAddr(ip netip.Addr) bool {
+	return ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast()
+}
+
+func recoveryHost(r *http.Request) bool {
+	host := r.Host
+	if addr, _, err := net.SplitHostPort(host); err == nil {
+		host = addr
+	}
+	if ip, err := netip.ParseAddr(strings.Trim(host, "[]")); err == nil {
+		addr, ok := r.Context().Value(http.LocalAddrContextKey).(*net.TCPAddr)
+		return ok && ip.Unmap().WithZone("") == addr.AddrPort().Addr().Unmap().WithZone("")
+	}
+	name, _ := os.Hostname()
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	name = strings.ToLower(name)
+	if host == "localhost" {
+		peer, err := netip.ParseAddrPort(r.RemoteAddr)
+		return err == nil && peer.Addr().Unmap().IsLoopback()
+	}
+	return name != "" && (host == name || host == name+".local")
+}
+
+func redirectToHTTP(w http.ResponseWriter, r *http.Request) {
+	host := r.Host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+		if strings.Contains(host, ":") {
+			host = "[" + host + "]"
+		}
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	http.Redirect(w, r, (&url.URL{Scheme: "http", Host: host, Path: "/"}).String(), http.StatusMovedPermanently)
+}
+
 func serveWeb() error {
-	secret, err := os.ReadFile("/run/rkdev-token")
-	token := strings.TrimSpace(string(secret))
-	if err != nil || !loginTokenRE.MatchString(token) {
-		return fmt.Errorf("没有有效的本次开机登录口令")
-	}
-	cert, err := generateSelfSignedCert()
-	if err != nil {
-		return err
-	}
-	secure := &http.Server{
-		Addr: ":443", Handler: webAuth(token, logRequests(http.DefaultServeMux)),
+	web := &http.Server{
+		Addr: ":80", Handler: recoveryWeb(logRequests(http.DefaultServeMux)),
 		ReadHeaderTimeout: 10 * time.Second, IdleTimeout: time.Minute,
-		TLSConfig: &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
 	}
-	// HTTP only directs a browser to HTTPS. It never handles credentials or API requests.
-	redirect := &http.Server{Addr: ":80", ReadHeaderTimeout: 5 * time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/" {
-			http.Error(w, "请使用 HTTPS 访问恢复系统", http.StatusBadRequest)
+	go func() {
+		cert, err := generateSelfSignedCert()
+		if err != nil {
+			log.Printf("[HTTPS redirect] %v", err)
 			return
 		}
-		host := r.Host
-		if h, _, err := net.SplitHostPort(host); err == nil {
-			host = h
-			if strings.Contains(host, ":") {
-				host = "[" + host + "]"
-			}
+		redirect := &http.Server{
+			Addr: ":443", Handler: http.HandlerFunc(redirectToHTTP), ReadHeaderTimeout: 5 * time.Second,
+			TLSConfig: &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
 		}
-		http.Redirect(w, r, (&url.URL{Scheme: "https", Host: host}).String(), http.StatusTemporaryRedirect)
-	})}
-	go func() { log.Printf("[HTTP] %v", redirect.ListenAndServe()) }()
-	log.Printf("RKdev %s: HTTPS :443", buildTime)
-	return secure.ListenAndServeTLS("", "")
+		log.Printf("[HTTPS redirect] %v", redirect.ListenAndServeTLS("", ""))
+	}()
+	log.Printf("RKdev %s: HTTP :80", buildTime)
+	return web.ListenAndServe()
 }
 
 func handleProfile(w http.ResponseWriter, r *http.Request) {
