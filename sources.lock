@@ -1,0 +1,14 @@
+{
+  "linux": {
+    "url": "https://github.com/ophub/linux-6.18.y.git",
+    "commit": "ce7e47209ac3bbb093d5530e02e593108cab4d3b",
+    "archive": {
+      "url": "https://codeload.github.com/ophub/linux-6.18.y/tar.gz/ce7e47209ac3bbb093d5530e02e593108cab4d3b",
+      "sha256": "25083f645997a0c33cbf7ccf082b132ed12d88790aced534e7aa704255263186"
+    }
+  },
+  "uboot": {
+    "url": "https://github.com/u-boot/u-boot.git",
+    "commit": "5e3b01c8466dbe45cd6a06299f8f4c7e8c1c2363"
+  }
+}

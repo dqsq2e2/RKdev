@@ -1,0 +1,6 @@
+* text=auto eol=lf
+*.png binary
+*.ico binary
+*.woff2 binary
+*.patch whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab
+recovery/app/res/logo-debian.svg whitespace=-blank-at-eol

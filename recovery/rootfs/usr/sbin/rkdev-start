@@ -1,0 +1,25 @@
+#!/bin/sh
+set -eu
+export PATH=/sbin:/usr/sbin:/bin:/usr/bin
+hostname rkdev
+mdev -s
+if [ -r /etc/rkdev-modules ]; then
+    while IFS= read -r name; do
+        [ -z "$name" ] || modprobe "$name" || :
+    done < /etc/rkdev-modules
+fi
+for path in /etc/rkdev-init.d/*; do
+    if [ -x "$path" ]; then "$path"; fi
+done
+ip link set lo up
+for path in /sys/class/net/eth*; do
+    [ -d "$path" ] || continue
+    name=${path##*/}
+    ip link set "$name" up || continue
+    udhcpc -b -i "$name" -p "/run/udhcpc-$name.pid" >/tmp/"udhcpc-$name.log" 2>&1 &
+done
+umask 077
+if [ ! -s /run/rkdev-token ]; then
+    od -An -N12 -tx1 /dev/urandom | tr -d ' \n' > /run/rkdev-token
+fi
+printf '\nRKdev web login: rkdev / %s\n' "$(cat /run/rkdev-token)" > /dev/console

@@ -1,0 +1,5 @@
+::sysinit:/usr/sbin/rkdev-start
+::respawn:/usr/bin/rkdev
+::askfirst:-/bin/sh
+::shutdown:/bin/sync
+::shutdown:/bin/umount -a -r

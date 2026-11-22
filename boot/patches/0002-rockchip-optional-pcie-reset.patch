@@ -1,0 +1,35 @@
+diff --git a/drivers/pci/pcie_dw_rockchip.c b/drivers/pci/pcie_dw_rockchip.c
+index b966ab57318..103911d1edf 100644
+--- a/drivers/pci/pcie_dw_rockchip.c
++++ b/drivers/pci/pcie_dw_rockchip.c
+@@ -428,8 +428,8 @@ static int rockchip_pcie_parse_dt(struct udevice *dev)
+ 
+ 	ret = gpio_request_by_name(dev, "reset-gpios", 0,
+ 				   &priv->rst_gpio, GPIOD_IS_OUT);
+-	if (ret) {
+-		dev_err(dev, "failed to find reset-gpios property\n");
++	if (ret && ret != -ENOENT) {
++		dev_err(dev, "failed to request reset-gpios (ret=%d)\n", ret);
+ 		return ret;
+ 	}
+ 
+@@ -472,7 +472,8 @@ rockchip_pcie_parse_dt_err_supply_regulator:
+ rockchip_pcie_parse_dt_err_clk_get_bulk:
+ 	reset_release_bulk(&priv->rsts);
+ rockchip_pcie_parse_dt_err_reset_get_bulk:
+-	dm_gpio_free(dev, &priv->rst_gpio);
++	if (dm_gpio_is_valid(&priv->rst_gpio))
++		dm_gpio_free(dev, &priv->rst_gpio);
+ 	return ret;
+ }
+ 
+@@ -521,7 +522,8 @@ static int rockchip_pcie_probe(struct udevice *dev)
+ rockchip_pcie_probe_err_init_port:
+ 	clk_release_bulk(&priv->clks);
+ 	reset_release_bulk(&priv->rsts);
+-	dm_gpio_free(dev, &priv->rst_gpio);
++	if (dm_gpio_is_valid(&priv->rst_gpio))
++		dm_gpio_free(dev, &priv->rst_gpio);
+ 
+ 	return ret;
+ }

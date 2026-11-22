@@ -1,0 +1,32 @@
+# 板包接口 v1
+
+板包是一个含 `board.json` 的本地目录。它可以来自任何 Git 仓库。路径都相对于该目录；板包内容（包括补丁和 overlay）是构建输入，只对由适配者审核的板包运行构建。
+
+| 字段 | 用途 |
+| --- | --- |
+| `schema`、`board_id`、`revision`、`name`、`soc`、`compatible` | 接口版本 `1`、规范板型和修订号、显示名、`rk3588`、Linux DT 的 compatible |
+| `default_profile`、`profiles` | 默认模式和可构建的 `spi`、`emmc` 模式。每种模式有自己的下面一组设置 |
+| 顶层 `firmware.ddr`、`firmware.bl31` | DDR/TPL 和 BL31；每项写 `sha256`，再写 `url`（HTTPS）、`path`（包内相对路径）或 `file`（由 `--firmware-dir` 提供）之一 |
+| `rootfs_overlay` | 可选。附加恢复文件；`/etc/rkdev-modules` 指定启动时加载的模块，`/etc/rkdev-init.d` 可提供板级初始化 |
+
+每种 profile 定义：
+
+| 字段 | 用途 |
+| --- | --- |
+| `uboot`、`linux` | 各有 `config` 和 `dts`；可选 `patches`（按顺序应用）和 `overlay`（按上游树相对位置覆盖文件） |
+| `device`、`capacity` | Linux 下的实际启动介质，以及产物的整盘长度（字节）。SPI 要求介质容量相同；eMMC 实际介质可以比恢复镜像大 |
+| `loader` | `offset`、`length`、`format`。RK3588 打包的 loader 从 `0x8000` 写入，格式为 `rockchip-spi` 或 `rockchip-sd` |
+| `environment` | `offsets` 和单份 `size`。SPI 一份、eMMC 可一份或两份。SPI env 必须独占其擦除块 |
+| `recovery` | `offset`、`length`、ext4 `label`。SPI 还须有 RAM `load_address`；eMMC 是 GPT `partition: 1`，同名 |
+| eMMC `system` / SPI `erase_size`、`mtd_name` | eMMC 定义系统区 `offset` 与占位分区 `label`。SPI 定义擦除大小及 MTD 名；指定 `/dev/mtdblockN` |
+| `boot_order`、`system_targets`、`recovery_args` | U-Boot 启动设备顺序、Web 允许的系统目标（默认同顺序）、恢复内核参数。设备值为 `emmc`、`sd`、`usb`、`nvme`、`sata` |
+| `key` | 可选。 `type: adc` 填 `channel`、`minimum`、`maximum`，或 `type: button` 填 DT 按键 `label`；可填 `samples`、`delay_ms`。 `action` 为 `recovery`、`maskrom` 或 `host-or-recovery`；最后一种另填 `usb_node`，可设 `wait_ms` |
+| `mmc_device`、`sd_device`、`loader_index`、`boot_fallback` | U-Boot 设备号（默认 eMMC 为 0，SD 为 1，Loader 为目标设备号）；本地恢复失败后回到 `console`、进入 `maskrom`，或在 eMMC 模式下进入 `loader` |
+| profile 下的 `firmware`、`release_url` | 可选。前者把固件描述映射到 `/lib/firmware` 相对路径；后者是 HTTPS 上的板型升级清单 |
+| `rkfw` | SPI profile 的可选 Rockchip 原始分区引导：`kernel`、`initrd`、`resource`、`root` 为相应分区号，`args` 是额外的内核参数 |
+
+布局以字节表示。容量、偏移、长度必须满足扇区或擦除块对齐，载荷不可重叠。eMMC v1 预留首尾 GPT，并使用 512 B 逻辑扇区。将较小恢复镜像写到较大 eMMC 后，须将备用 GPT 移到实际磁盘末尾；验收时以真实设备的两份 GPT 为准。G98 的 SPI 与 eMMC 引脚互斥属于实际板的电气配置。
+
+构建器从布局生成 SHA-256 `layout_id`，绑定 `/chosen/rkdev,*`、镜像清单、恢复 ext4 UUID 和默认 `rkdev_layout`。同一个 ID 的兼容更新可替换恢复和引导；偏移或分区规则改变应另做迁移包。环境的 `rkdev_targets` 记录用户启动顺序，`rkdev_installing` 由恢复程序在 eMMC 系统安装期间管理。恢复会核对运行中的 DT 身份、目标设备的几何和恢复区标识，才启用该布局的写入功能。
+
+在线清单文件名可以不同于镜像；其 `image.name` 必须是同目录下的 `.img`。离线升级从网页选对应 `.img` 和 `.json`。哈希用于检测不匹配或损坏；在线信任来自板包选定的 HTTPS 发布地址。新增板包应先在非生产介质上验证冷启动、恢复、USB 下载模式和镜像读回，再对外发固件。
