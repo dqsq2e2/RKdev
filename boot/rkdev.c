@@ -234,6 +234,8 @@ void rkdev_prepare_boot(void)
 
 	layout_env = saved_layout && !strcmp(saved_layout, RKDEV_LAYOUT);
 	writel(BOOT_NORMAL, CONFIG_ROCKCHIP_BOOT_MODE_REG);
+	if (!env_get("stdin"))
+		env_set("stdin", "serial");
 	env_set("bootcmd", "rkdevboot");
 	env_set("preboot", NULL);
 	env_set("bootlimit", NULL);
