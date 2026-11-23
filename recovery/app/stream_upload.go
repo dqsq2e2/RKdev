@@ -54,6 +54,8 @@ type streamTarget struct {
 	layout  *runtimeLayout
 	check   func() error
 	begin   func() (func() error, error)
+	pinned  bool
+	guard   func() error
 }
 
 // Refuse mounted disks, swap and device-mapper/RAID holders before receiving
@@ -73,7 +75,8 @@ func linuxDeviceID(id uint64) string {
 
 func checkBlockDeviceIdentity(info os.FileInfo, sysPath string) error {
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || linuxDeviceID(uint64(stat.Rdev)) != sysValue(sysPath+"/dev") {
+	if !ok || info.Mode()&os.ModeDevice == 0 || info.Mode()&os.ModeCharDevice != 0 ||
+		linuxDeviceID(uint64(stat.Rdev)) != sysValue(sysPath+"/dev") {
 		return fmt.Errorf("设备节点与内核块设备不匹配")
 	}
 	return nil
@@ -154,6 +157,10 @@ func checkBlockIdle(target string) error {
 }
 
 func openStreamTarget(path string) (*streamTarget, error) {
+	return openStreamTargetPinned(path, nil)
+}
+
+func openStreamTargetPinned(path string, identity *mediaIdentity) (*streamTarget, error) {
 	if err := checkFlashDiskIdle(path); err != nil {
 		return nil, err
 	}
@@ -161,17 +168,44 @@ func openStreamTarget(path string) (*streamTarget, error) {
 	if err != nil || sectors == 0 || sectors > math.MaxInt64/512 {
 		return nil, fmt.Errorf("目标设备容量无效")
 	}
-	t := &streamTarget{path: path, sectors: sectors, limit: int64(sectors * 512), system: isSystemSlotTarget(path)}
+	system := isSystemSlotTarget(path)
+	flags := os.O_RDWR | os.O_SYNC | syscall.O_NOFOLLOW
+	if identity != nil && !system {
+		flags |= syscall.O_EXCL // prevent concurrent mounts on the disk and its partitions
+	}
+	file, err := os.OpenFile(path, flags, 0)
+	if err != nil {
+		return nil, err
+	}
+	ok := false
+	defer func() {
+		if !ok {
+			file.Close()
+		}
+	}()
+	t := &streamTarget{file: file, path: path, sectors: sectors, limit: int64(sectors * 512), system: system}
+	if identity != nil {
+		t.pinned = true
+		t.guard = func() error { return identity.check(file) }
+		if err := t.guard(); err != nil {
+			return nil, err
+		}
+	}
 	if t.system {
 		t.layout = &currentLayout
 		t.begin = t.layout.beginSystemInstall
+		if identity != nil {
+			t.begin = func() (func() error, error) {
+				return t.layout.beginSystemInstallOn(t.file, func() error { return t.guard() })
+			}
+		}
 		if err := validateBootClock(time.Now()); err != nil {
 			return nil, err
 		}
 		if err := t.layout.checkMedium(true); err != nil {
 			return nil, err
 		}
-		t.current, err = readGPT(path)
+		t.current, err = readGPTReader(t.file)
 		if err != nil {
 			return nil, err
 		}
@@ -181,20 +215,25 @@ func openStreamTarget(path string) (*streamTarget, error) {
 		t.offset = t.layout.System.Offset
 		t.limit -= t.offset + gptBackupSectors*512
 	}
-	t.file, err = os.OpenFile(path, os.O_RDWR|os.O_SYNC, 0)
 	t.check = func() error {
+		if t.guard != nil {
+			if err := t.guard(); err != nil {
+				return err
+			}
+		}
 		if err := checkFlashDiskIdle(path); err != nil {
 			return err
 		}
 		if t.system {
-			current, err := readGPT(path)
+			current, err := readGPTReader(t.file)
 			if err != nil || !sameGPT(current, t.current) {
 				return fmt.Errorf("eMMC 分区表已变化，请刷新后重试")
 			}
 		}
 		return nil
 	}
-	return t, err
+	ok = true
+	return t, nil
 }
 
 type streamImage struct {
@@ -235,6 +274,10 @@ func beginStreamImage(target *streamTarget, prefix []byte, expected int64) (*str
 	s := &streamImage{target: target, hash: sha256.New(), expected: expected, start: time.Now()}
 	hasGPT := len(prefix) >= 520 && string(prefix[512:520]) == "EFI PART"
 	if hasGPT {
+		if target.pinned && (!target.system && sysInt("/sys/class/block/"+filepath.Base(target.path)+"/queue/logical_block_size") != 512 ||
+			prefix[510] != 0x55 || prefix[511] != 0xaa) {
+			return nil, fmt.Errorf("目标扇区大小或镜像 GPT 保护 MBR 不兼容")
+		}
 		var size int64
 		var err error
 		s.sourceGPT, size, err = streamGPT(prefix)
@@ -356,17 +399,35 @@ func (s *streamImage) commit(ctx context.Context) error {
 	if err := checkFlashDiskIdle(s.target.path); err != nil {
 		return err
 	}
+	if s.target.pinned {
+		if err := s.target.check(); err != nil {
+			return err
+		}
+	}
+	path := s.target.path
 	if s.target.system {
-		current, err := readGPT(s.target.path)
+		current, err := readGPTReader(s.target.file)
 		if err != nil || !sameGPT(current, s.target.current) {
 			return fmt.Errorf("写入过程中 eMMC 分区表发生变化，未提交新分区表")
 		}
 		updateTask(s.task.ID, func(t *FlashTask) { t.Status = "partitioning" })
-		if err := s.target.layout.applySystemAreaPartitions(s.task); err != nil {
+		if s.target.pinned {
+			recovery, err := s.target.layout.recoveryPartition(current)
+			if err != nil {
+				return err
+			}
+			parts := append([]gptPartition{recovery}, s.nextGPT...)
+			if err := rewritePinnedGPT(s.target.file, s.target.sectors, parts, true, s.target.guard); err != nil {
+				return err
+			}
+			if err := rereadPinnedGPT(s.target.file); err != nil {
+				return err
+			}
+		} else if err := s.target.layout.applySystemAreaPartitions(s.task); err != nil {
 			return err
 		}
 		if len(s.sourceGPT) > 0 {
-			if err := adaptSystemBootPartitions(s.task, s.sourceGPT); err != nil {
+			if err := adaptSystemBootPartitionsOn(s.task, s.sourceGPT, s.target); err != nil {
 				return err
 			}
 		}
@@ -375,12 +436,23 @@ func (s *streamImage) commit(ctx context.Context) error {
 		}
 		return nil
 	}
+	if s.target.pinned {
+		if len(s.sourceGPT) > 0 {
+			if err := rewritePinnedGPT(s.target.file, s.target.sectors, nil, false, s.target.guard); err != nil {
+				return err
+			}
+		}
+		if err := s.target.guard(); err != nil {
+			return err
+		}
+		return rereadPinnedGPT(s.target.file)
+	}
 	if len(s.sourceGPT) > 0 {
-		if out, err := exec.Command("sgdisk", "-e", s.target.path).CombinedOutput(); err != nil {
+		if out, err := exec.Command("sgdisk", "-e", path).CombinedOutput(); err != nil {
 			return fmt.Errorf("修正备份 GPT 失败: %v: %s", err, out)
 		}
 	}
-	if out, err := exec.Command("partprobe", s.target.path).CombinedOutput(); err != nil {
+	if out, err := exec.Command("partprobe", path).CombinedOutput(); err != nil {
 		return fmt.Errorf("刷新目标分区表失败: %v: %s", err, out)
 	}
 	return nil

@@ -8,6 +8,7 @@
     <link rel="stylesheet" href="/res/xterm.min.css">
     <script src="/res/xterm.min.js"></script>
     <script src="/res/addon-fit.min.js"></script>
+    <link rel="stylesheet" href="/res/settings.css">
     <style>
         :root {
             --bg-page: #f0f2f5;
@@ -638,7 +639,8 @@
         <div class="nav-tab" data-panel="storage-panel" onclick="switchTab(this)">🔌 硬件检测</div>
         <div class="nav-tab" data-panel="update-panel" onclick="switchTab(this)">📦 更新助手</div>
         <div class="nav-tab" data-panel="backup-panel" onclick="switchTab(this)">💿 备份还原</div>
-        <div class="nav-tab" data-panel="firewall-panel" onclick="switchTab(this)">🛡️ 防火墙</div>
+        <div class="nav-tab" data-panel="firewall-panel" onclick="switchTab(this)">🌐 网络配置</div>
+        <div class="nav-tab" data-panel="ssh-panel" onclick="switchTab(this)">🔑 SSH</div>
         <div class="nav-tab" data-panel="terminal-panel" onclick="switchTab(this)">💻 终端</div>
     </div>
 </div>
@@ -663,6 +665,10 @@
                     <input type="file" name="firmware" id="firmware-file" accept=".img,.bin,.gz,.rar,.bz2,.zip,.7z,.tar,.tgz,.tbz,.tbz2" required>
                     <button type="submit" class="primary" id="btn-flash">⚡ 开始刷写</button>
                 </form>
+                <details class="device-media" data-media="flash">
+                    <summary>从设备存储选择镜像</summary>
+                    <div class="device-media-body"></div>
+                </details>
 
                 <div class="progress-container" id="progress-container">
                     <div style="margin-bottom:8px;font-weight:bold;">刷写进度 <span class="status-badge" id="status-badge"></span></div>
@@ -888,8 +894,11 @@
 
 <div id="firewall-panel" class="panel">
     <div class="fw-card">
-        <h1>🛡️ 防火墙</h1>
-        <p class="subtitle">基于 iptables 的网络访问控制，支持入站规则、转发规则和端口转发（DNAT）。规则存储在自定义链 RKDEV_* 中，不影响系统原有规则。</p>
+        <h1>网络配置</h1>
+        <div id="network-settings"></div>
+        <div id="network-firewall" hidden>
+        <p class="subtitle">管理入站、转发和端口映射规则。</p>
+        <div id="fw-trial" class="settings-trial" aria-live="polite" hidden></div>
 
         <div class="fw-header">
             <div class="fw-toggle">
@@ -899,13 +908,9 @@
                 <span class="fw-toggle-label" id="fw-toggle-label">已禁用</span>
             </div>
             <div style="display:flex;gap:10px;align-items:center;">
-                <span class="fw-policy-badge" id="fw-input-policy">INPUT: -</span>
-                <span class="fw-policy-badge" id="fw-forward-policy">FORWARD: -</span>
                 <button type="button" class="btn-storage-refresh" onclick="loadFirewallStatus()">🔄 刷新</button>
             </div>
         </div>
-
-        <div class="update-warning-box">⚠️ <strong>防火墙规则即时生效，配置不当可能导致设备无法访问。</strong>如被锁出，可通过物理终端或串口连接设备执行 <code style="background:var(--bg-code);padding:2px 6px;border-radius:3px;color:#e6edf3;">iptables -F RKDEV_INPUT</code> 清除规则。</div>
 
         <div class="fw-section">
             <div class="fw-section-title">📥 入站规则 (INPUT)</div>
@@ -963,7 +968,7 @@
         </div>
 
         <div class="fw-section">
-            <div class="fw-section-title">📡 端口转发 (DNAT / SNAT)</div>
+            <div class="fw-section-title">📡 地址转换 (NAT)</div>
             <div class="fw-add-form">
                 <div class="fw-form-row">
                     <span class="fw-form-label">类型</span>
@@ -985,6 +990,14 @@
             </div>
             <div id="fw-nat-rules"></div>
         </div>
+        </div>
+    </div>
+</div>
+
+<div id="ssh-panel" class="panel">
+    <div class="fw-card">
+        <h1>SSH 配置</h1>
+        <div id="ssh-settings"></div>
     </div>
 </div>
 
@@ -1010,6 +1023,10 @@
             </div>
             <div class="boot-actions"><button class="btn-boot-save" id="recovery-submit" type="submit">上传并升级</button></div>
         </form>
+        <details class="device-media" data-media="upgrade">
+            <summary>从设备存储选择升级文件</summary>
+            <div class="device-media-body"></div>
+        </details>
         <p id="recovery-result" class="update-status" role="status" aria-live="polite"></p>
         </div>
         <div class="update-section" id="online-update" hidden>
@@ -1074,6 +1091,8 @@
         el.classList.add('active');
         document.getElementById(el.dataset.panel).classList.add('active');
         if (el.dataset.panel === 'storage-panel') loadHardwareAll();
+        if (el.dataset.panel === 'firewall-panel') window.rkSettings?.openNetwork();
+        if (el.dataset.panel === 'ssh-panel') window.rkSettings?.openSSH();
 
         if (el.dataset.panel === 'terminal-panel') {
             if (!termInitialized) {
@@ -1739,19 +1758,15 @@
         try {
             const resp = await fetch('/api/firewall/status');
             const d = await resp.json();
+            if (!resp.ok || d.error) throw new Error(d.error || "状态加载失败");
             fwEnabled = d.enabled;
             updateFwToggle(d.enabled);
-            var inputPolicy = document.getElementById('fw-input-policy');
-            inputPolicy.textContent = 'INPUT: ' + (d.inputPolicy || '-');
-            inputPolicy.className = 'fw-policy-badge fw-policy-' + (d.inputPolicy || 'ACCEPT');
-            var fwdPolicy = document.getElementById('fw-forward-policy');
-            fwdPolicy.textContent = 'FORWARD: ' + (d.forwardPolicy || '-');
-            fwdPolicy.className = 'fw-policy-badge fw-policy-' + (d.forwardPolicy || 'DROP');
+            window.rkSettings?.drawFirewallTrial(d);
             renderFwRules('fw-input-rules', d.inputRules, 'input');
             renderFwRules('fw-forward-rules', d.forwardRules, 'forward');
             renderFwRules('fw-nat-rules', d.natRules, 'nat');
         } catch (e) {
-            document.getElementById('fw-input-rules').innerHTML = '<div class="fw-empty">❌ 加载失败: ' + e.message + '</div>';
+            document.getElementById('fw-input-rules').textContent = '加载失败：' + e.message;
         }
     }
 
@@ -1803,6 +1818,7 @@
     }
 
     async function addFirewallRule(chain) {
+        if (window.rkSettings?.firewallTrialActive()) return;
         var req = { chain: chain };
         if (chain === 'input') {
             req.action = document.getElementById('fw-input-action').value;
@@ -1820,6 +1836,7 @@
             req.protocol = document.getElementById('fw-nat-proto').value;
             req.dstPort = document.getElementById('fw-nat-dport').value.trim();
             req.natTarget = document.getElementById('fw-nat-target').value.trim();
+            if (req.action === 'masquerade') req.protocol = 'all', req.dstPort = '', req.natTarget = '';
         }
 
         if (chain === 'nat' && req.action === 'dnat' && (!req.dstPort || !req.natTarget)) {
@@ -1856,6 +1873,7 @@
     }
 
     async function deleteFwRule(chain, id) {
+        if (window.rkSettings?.firewallTrialActive()) return;
         if (!confirm('确定删除规则 #' + id + '？')) return;
         try {
             const resp = await fetch('/api/firewall/delete', {
@@ -1875,6 +1893,7 @@
     }
 
     async function toggleFirewall() {
+        if (window.rkSettings?.firewallTrialActive()) return;
         var newEnabled = !fwEnabled;
         try {
             const resp = await fetch('/api/firewall/toggle', {
@@ -2600,6 +2619,7 @@
         html += '<div class="storage-smart-grid">';
         html += '<div class="smart-item"><div class="smart-label">健康状态</div><div class="smart-value emmc-status emmc-status-' + status + '">' + escHtml(info.summary) + '</div></div>';
         for (const [label, value] of [
+            ['整盘容量', info.capacityBytes > 0 ? (info.capacityBytes / 1073741824).toFixed(2) + ' GiB' : '未知'],
             ['寿命估算 1', info.lifeA.label + '（' + emmcRaw(info.lifeA.raw) + '）'],
             ['寿命估算 2', info.lifeB.label + '（' + emmcRaw(info.lifeB.raw) + '）'],
             ['备用块预警', info.preEolLabel + '（' + emmcRaw(info.preEol) + '）'],
@@ -3057,5 +3077,6 @@
         renderFwDownloads();
     };
 </script>
+<script src="/res/settings.js"></script>
 </body>
 </html>

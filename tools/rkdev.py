@@ -101,7 +101,8 @@ def source_key(board_root, board_path, cfg, data, component, lock):
     files = [path_in(board_root, cfg[component]["config"]),
              path_in(board_root, cfg[component]["dts"])]
     if component == "uboot":
-        files += [CORE / "boot/rkdev.c", CORE / "tools/uboot.py"]
+        files += [CORE / "boot/rkdev.c", CORE / "boot/rkdev-logo.bmp.gz", CORE / "tools/uboot.py"]
+        files += sorted((CORE / "boot/video").glob("*.[ch]"))
     files += sorted((CORE / ("boot" if component == "uboot" else "recovery/kernel") / "patches").glob("*.patch"))
     files += [path_in(board_root, p) for p in cfg[component].get("patches", [])]
     if "overlay" in cfg[component]:
@@ -244,7 +245,7 @@ def build_rootfs(args, root, board, cfg, data, stage, modules, kernelrelease, en
         target.parent.mkdir(parents=True, exist_ok=True)
         run([args.cross_compile + "gcc", "-O2", "-static", "-Wall", "-Wextra",
              "-Werror", "-s", "-o", target, path_in(root, source_path)])
-    for path in (rootfs / "init", rootfs / "usr/sbin/rkdev-start"):
+    for path in (rootfs / "init", rootfs / "usr/sbin/rkdev-start", rootfs / "usr/sbin/rkdev-display"):
         path.chmod(0o755)
     network = rootfs / "etc/rkdev-network"
     if network.is_file():
@@ -269,7 +270,8 @@ def build_rootfs(args, root, board, cfg, data, stage, modules, kernelrelease, en
     env = os.environ.copy()
     env.update(GOOS="linux", GOARCH="arm64", CGO_ENABLED="0")
     app = rootfs / "usr/bin/rkdev"
-    run(["go", "build", "-trimpath", "-buildvcs=false", "-ldflags", f"-s -w -X main.buildTime={args.version}",
+    display = [] if (rootfs / "etc/rkdev-display-enabled").is_file() else ["-tags", "rkdev_nodisplay"]
+    run(["go", "build", *display, "-trimpath", "-buildvcs=false", "-ldflags", f"-s -w -X main.buildTime={args.version}",
          "-o", app, "."], cwd=CORE / "recovery/app", env=env)
     cp = run(["chroot", rootfs, "apk", "info", "-v"], capture_output=True, text=True)
     return rootfs, sorted(cp.stdout.splitlines())

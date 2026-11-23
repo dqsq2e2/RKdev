@@ -12,6 +12,10 @@ ip link set lo up
 for path in /etc/rkdev-init.d/*; do
     if [ -x "$path" ]; then "$path"; fi
 done
+if [ -r /etc/rkdev-network.json ]; then
+    # The shared controller reads the board defaults when rkdev starts.
+    exit 0
+fi
 if [ -x /etc/rkdev-network ]; then
     /etc/rkdev-network &
     exit 0

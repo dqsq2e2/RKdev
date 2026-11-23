@@ -1,0 +1,415 @@
+diff --git a/common/usb_kbd.c b/common/usb_kbd.c
+--- a/common/usb_kbd.c
++++ b/common/usb_kbd.c
+@@ -11,6 +11,7 @@
+ #include <env.h>
+ #include <errno.h>
+ #include <log.h>
++#include <stdio.h>
+ #include <malloc.h>
+ #include <memalign.h>
+ #include <stdio_dev.h>
+@@ -117,6 +118,9 @@
+ 	int		intinterval;
+ 	unsigned long	last_report;
+ 	struct int_queue *intq;
++	struct stdio_dev *sdev;
++	unsigned long last_poll;
++	bool control_poll;
+ 
+ 	uint32_t	ifnum;
+ 
+@@ -133,9 +137,6 @@
+ };
+ 
+ extern int __maybe_unused net_busy_flag;
+-
+-/* The period of time between two calls of usb_kbd_testc(). */
+-static unsigned long kbd_testc_tms;
+ 
+ int usb_kbd_remove_for_test(void)
+ {
+@@ -257,7 +258,7 @@
+ #ifdef CONFIG_USB_KEYBOARD_FN_KEYS
+ 	if (scancode < 0x3a || scancode > 0x52 ||
+ 	    scancode == 0x46 || scancode == 0x47)
+-		return 1;
++		return 0;
+ 
+ 	usb_kbd_put_queue(data, 0x1b);
+ 	if (scancode < 0x3e) {
+@@ -298,7 +299,7 @@
+ 		usb_kbd_put_queue(data, usb_special_keys[scancode - 0x4f]);
+ 		return 0;
+ 	}
+-	return 1;
++	return 0;
+ #endif /* CONFIG_USB_KEYBOARD_FN_KEYS */
+ }
+ 
+@@ -332,12 +333,15 @@
+ 	struct usb_kbd_pdata *data = dev->privptr;
+ 	int i, res = 0;
+ 
+-	/* No combo key pressed */
+-	if (data->new[0] == 0x00)
++	/* Ignore HID rollover/error reports, keeping the last valid keys. */
++	for (i = 2; i < USB_KBD_BOOT_REPORT_SIZE; i++)
++		if (data->new[i] && data->new[i] <= 3)
++			return 1;
++
++	if (data->new[0] & (LEFT_CNTR | RIGHT_CNTR))
++		data->flags |= USB_KBD_CTRL;
++	else
+ 		data->flags &= ~USB_KBD_CTRL;
+-	/* Left or Right Ctrl pressed */
+-	else if ((data->new[0] == LEFT_CNTR) || (data->new[0] == RIGHT_CNTR))
+-		data->flags |= USB_KBD_CTRL;
+ 
+ 	for (i = 2; i < USB_KBD_BOOT_REPORT_SIZE; i++) {
+ 		res |= usb_kbd_service_key(dev, i, 0);
+@@ -379,31 +383,42 @@
+ 	if (usb_int_msg(dev, data->intpipe, &data->new[0],
+ 			data->intpktsize, data->intinterval, true) >= 0)
+ 		usb_kbd_irq_worker(dev);
+-#elif defined(CONFIG_SYS_USB_EVENT_POLL_VIA_CONTROL_EP) || \
+-      defined(CONFIG_SYS_USB_EVENT_POLL_VIA_INT_QUEUE)
+-#if defined(CONFIG_SYS_USB_EVENT_POLL_VIA_CONTROL_EP)
+-	struct usb_interface *iface;
+-	struct usb_kbd_pdata *data = dev->privptr;
+-	iface = &dev->config.if_desc[data->ifnum];
+-	usb_get_report(dev, iface->desc.bInterfaceNumber,
+-		       1, 0, data->new, USB_KBD_BOOT_REPORT_SIZE);
+-	if (memcmp(data->old, data->new, USB_KBD_BOOT_REPORT_SIZE)) {
+-		usb_kbd_irq_worker(dev);
+ #else
+ 	struct usb_kbd_pdata *data = dev->privptr;
+-	if (poll_int_queue(dev, data->intq)) {
+-		usb_kbd_irq_worker(dev);
+-		/* We've consumed all queued int packets, create new */
+-		destroy_int_queue(dev, data->intq);
+-		data->intq = create_int_queue(dev, data->intpipe, 1,
+-				      USB_KBD_BOOT_REPORT_SIZE, data->new,
+-				      data->intinterval);
+-#endif
+-		data->last_report = get_timer(0);
+-	/* Repeat last usb hid report every REPEAT_RATE ms for keyrepeat */
+-	} else if (data->last_report != -1 &&
+-		   get_timer(data->last_report) > REPEAT_RATE) {
+-		usb_kbd_irq_worker(dev);
++	bool report = false;
++
++	if (data->control_poll) {
++		struct usb_interface *iface = &dev->config.if_desc[data->ifnum];
++		int len = usb_get_report(dev, iface->desc.bInterfaceNumber, 1, 0,
++					 data->new, USB_KBD_BOOT_REPORT_SIZE);
++
++		if (len != USB_KBD_BOOT_REPORT_SIZE) {
++			data->control_poll = false;
++			return;
++		}
++		report = memcmp(data->old, data->new, USB_KBD_BOOT_REPORT_SIZE) != 0;
++	} else if (data->intq && poll_int_queue(dev, data->intq)) {
++		report = !dev->irq_status && dev->irq_act_len == USB_KBD_BOOT_REPORT_SIZE;
++		if (report) {
++			usb_kbd_irq_worker(dev);
++			data->last_report = get_timer(0);
++		}
++		/* Never inspect the DMA buffer after rearming the endpoint. */
++		if (!destroy_int_queue(dev, data->intq))
++			data->intq = create_int_queue(dev, data->intpipe, 1,
++					      USB_KBD_BOOT_REPORT_SIZE, data->new,
++					      data->intinterval);
++		return;
++	}
++	if (report || (data->last_report != -1 &&
++		       get_timer(data->last_report) >= REPEAT_RATE)) {
++		/* data->new may be owned by an active interrupt transfer. */
++		u8 scancode = data->old[2];
++
++		if (report)
++			usb_kbd_irq_worker(dev);
++		else if (scancode > 3)
++			usb_kbd_translate(data, scancode, data->old[0], 2);
+ 		data->last_report = get_timer(0);
+ 	}
+ #endif
+@@ -412,9 +427,8 @@
+ /* test if a character is in the queue */
+ static int usb_kbd_testc(struct stdio_dev *sdev)
+ {
+-	struct stdio_dev *dev;
+-	struct usb_device *usb_kbd_dev;
+-	struct usb_kbd_pdata *data;
++	struct usb_device *usb_kbd_dev = sdev->priv;
++	struct usb_kbd_pdata *data = usb_kbd_dev->privptr;
+ 
+ 	/*
+ 	 * Polling the keyboard for an event can take dozens of milliseconds.
+@@ -441,13 +455,10 @@
+ 		poll_delay = 0;
+ #endif
+ 
+-	dev = stdio_get_by_name(sdev->name);
+-	usb_kbd_dev = (struct usb_device *)dev->priv;
+-	data = usb_kbd_dev->privptr;
+-
+-	if (get_timer(kbd_testc_tms) >= poll_delay) {
++	if (data->usb_in_pointer == data->usb_out_pointer &&
++	    get_timer(data->last_poll) >= poll_delay) {
+ 		usb_kbd_poll_for_event(usb_kbd_dev);
+-		kbd_testc_tms = get_timer(0);
++		data->last_poll = get_timer(0);
+ 	}
+ 
+ 	return !(data->usb_in_pointer == data->usb_out_pointer);
+@@ -456,13 +467,8 @@
+ /* gets the character from the queue */
+ static int usb_kbd_getc(struct stdio_dev *sdev)
+ {
+-	struct stdio_dev *dev;
+-	struct usb_device *usb_kbd_dev;
+-	struct usb_kbd_pdata *data;
+-
+-	dev = stdio_get_by_name(sdev->name);
+-	usb_kbd_dev = (struct usb_device *)dev->priv;
+-	data = usb_kbd_dev->privptr;
++	struct usb_device *usb_kbd_dev = sdev->priv;
++	struct usb_kbd_pdata *data = usb_kbd_dev->privptr;
+ 
+ 	while (data->usb_in_pointer == data->usb_out_pointer) {
+ 		schedule();
+@@ -483,7 +489,7 @@
+ 	struct usb_interface *iface;
+ 	struct usb_endpoint_descriptor *ep;
+ 	struct usb_kbd_pdata *data;
+-	unsigned int quirks = 0;
++	unsigned int __maybe_unused quirks = 0;
+ 	int epNum;
+ 
+ 	if (dev->descriptor.bNumConfigurations != 1)
+@@ -538,6 +544,10 @@
+ 	data->new = memalign(USB_DMA_MINALIGN,
+ 		roundup(USB_KBD_BOOT_REPORT_SIZE, USB_DMA_MINALIGN));
+ 
++	if (!data->new) {
++		free(data);
++		return 0;
++	}
+ 	data->ifnum = ifnum;
+ 
+ 	/* Insert private data into USB device structure */
+@@ -565,6 +575,27 @@
+ 	usb_set_idle(dev, iface->desc.bInterfaceNumber, 0, 0);
+ #endif
+ 
++#ifdef CONFIG_SYS_USB_EVENT_POLL_VIA_INT_QUEUE
++	/*
++	 * An idle keyboard need not send a report. Arm an asynchronous transfer
++	 * and let the caller poll it without waiting for a key at enumeration.
++	 */
++	data->intq = create_int_queue(dev, data->intpipe, 1,
++				      USB_KBD_BOOT_REPORT_SIZE, data->new,
++				      data->intinterval);
++	if (data->intq)
++		return 1;
++#endif
++#if defined(CONFIG_SYS_USB_EVENT_POLL_VIA_CONTROL_EP) || \
++    defined(CONFIG_SYS_USB_EVENT_POLL_VIA_INT_QUEUE)
++	/* xHCI has no interrupt queue implementation. Use HID GET_REPORT. */
++	if (usb_get_report(dev, iface->desc.bInterfaceNumber, 1, 0, data->new,
++			   USB_KBD_BOOT_REPORT_SIZE) == USB_KBD_BOOT_REPORT_SIZE) {
++		data->control_poll = true;
++		usb_kbd_irq_worker(dev);
++		return 1;
++	}
++#else
+ 	/*
+ 	 * Apple and Keychron keyboards do not report the device state. Reports
+ 	 * are only returned during key presses.
+@@ -574,26 +605,18 @@
+ 		return 1;
+ 	}
+ 	debug("USB KBD: enable interrupt pipe...\n");
+-#ifdef CONFIG_SYS_USB_EVENT_POLL_VIA_INT_QUEUE
+-	data->intq = create_int_queue(dev, data->intpipe, 1,
+-				      USB_KBD_BOOT_REPORT_SIZE, data->new,
+-				      data->intinterval);
+-	if (!data->intq) {
+-#elif defined(CONFIG_SYS_USB_EVENT_POLL_VIA_CONTROL_EP)
+-	if (usb_get_report(dev, iface->desc.bInterfaceNumber,
+-			   1, 0, data->new, USB_KBD_BOOT_REPORT_SIZE) < 0) {
+-#else
+ 	if (usb_int_msg(dev, data->intpipe, data->new, data->intpktsize,
+-			data->intinterval, false) < 0) {
+-#endif
+-		printf("Failed to get keyboard state from device %04x:%04x\n",
+-		       dev->descriptor.idVendor, dev->descriptor.idProduct);
+-		/* Abort, we don't want to use that non-functional keyboard. */
+-		return 0;
+-	}
+-
+-	/* Success. */
+-	return 1;
++			data->intinterval, false) >= 0)
++		return 1;
++#endif
++
++	debug("Failed to get keyboard state from device %04x:%04x\n",
++	      dev->descriptor.idVendor, dev->descriptor.idProduct);
++	dev->privptr = NULL;
++	dev->irq_handle = NULL;
++	free(data->new);
++	free(data);
++	return 0;
+ }
+ 
+ static int probe_usb_keyboard(struct usb_device *dev)
+@@ -603,6 +626,7 @@
+ 	unsigned int ifnum;
+ 	unsigned int max_ifnum = min((unsigned int)USB_MAX_ACTIVE_INTERFACES,
+ 				     (unsigned int)dev->config.no_of_if);
++	struct usb_kbd_pdata *data;
+ 	int error;
+ 
+ 	/* Try probing the keyboard */
+@@ -616,30 +640,40 @@
+ 	/* Register the keyboard */
+ 	debug("USB KBD: register.\n");
+ 	memset(&usb_kbd_dev, 0, sizeof(struct stdio_dev));
+-	strcpy(usb_kbd_dev.name, DEVNAME);
++	strlcpy(usb_kbd_dev.name, DEVNAME, sizeof(usb_kbd_dev.name));
++	for (unsigned int i = 1; stdio_get_by_name(usb_kbd_dev.name); i++)
++		snprintf(usb_kbd_dev.name, sizeof(usb_kbd_dev.name), DEVNAME "%u", i);
+ 	usb_kbd_dev.flags = DEV_FLAGS_INPUT | DEV_FLAGS_DM;
+ 	usb_kbd_dev.getc = usb_kbd_getc;
+ 	usb_kbd_dev.tstc = usb_kbd_testc;
+ 	usb_kbd_dev.priv = (void *)dev;
+-	error = stdio_register(&usb_kbd_dev);
+-	if (error)
++	data = dev->privptr;
++	error = stdio_register_dev(&usb_kbd_dev, &data->sdev);
++	if (error) {
++		if (data->intq)
++			destroy_int_queue(dev, data->intq);
++		free(data->new);
++		free(data);
++		dev->privptr = NULL;
++		dev->irq_handle = NULL;
+ 		return error;
++	}
+ 
+ 	stdinname = env_get("stdin");
+ #if CONFIG_IS_ENABLED(CONSOLE_MUX)
+-	if (strstr(stdinname, DEVNAME) != NULL) {
++	if (stdinname && strstr(stdinname, usb_kbd_dev.name)) {
+ 		error = iomux_doenv(stdin, stdinname);
+ 		if (error)
+ 			return error;
+ 	}
+ #else
+ 	/* Check if this is the standard input device. */
+-	if (!strcmp(stdinname, DEVNAME)) {
++	if (stdinname && !strcmp(stdinname, usb_kbd_dev.name)) {
+ 		/* Reassign the console */
+ 		if (overwrite_console())
+ 			return 1;
+ 
+-		error = console_assign(stdin, DEVNAME);
++		error = console_assign(stdin, usb_kbd_dev.name);
+ 		if (error)
+ 			return error;
+ 	}
+@@ -662,14 +696,10 @@
+ 	struct stdio_dev *sdev;
+ 	int ret;
+ 
+-	sdev = stdio_get_by_name(DEVNAME);
+-	if (!sdev) {
+-		ret = -ENXIO;
+-		goto err;
+-	}
+ 	data = udev->privptr;
++	sdev = data->sdev;
+ #if CONFIG_IS_ENABLED(CONSOLE_MUX)
+-	if (iomux_replace_device(stdin, DEVNAME, "nulldev")) {
++	if (iomux_replace_device(stdin, sdev->name, "nulldev")) {
+ 		ret = -ENOLINK;
+ 		goto err;
+ 	}
+@@ -678,11 +708,12 @@
+ 		ret = -EPERM;
+ 		goto err;
+ 	}
+-#ifdef CONFIG_SYS_USB_EVENT_POLL_VIA_INT_QUEUE
+-	destroy_int_queue(udev, data->intq);
+-#endif
++	if (data->intq)
++		destroy_int_queue(udev, data->intq);
+ 	free(data->new);
+ 	free(data);
++	udev->privptr = NULL;
++	udev->irq_handle = NULL;
+ 
+ 	return 0;
+ err:
+diff --git a/drivers/usb/host/ehci-hcd.c b/drivers/usb/host/ehci-hcd.c
+--- a/drivers/usb/host/ehci-hcd.c
++++ b/drivers/usb/host/ehci-hcd.c
+@@ -1464,8 +1464,15 @@
+ 		return NULL;
+ 	}
+ 
+-	toggle = QT_TOKEN_GET_DT(token);
+-	usb_settoggle(dev, usb_pipeendpoint(pipe), usb_pipeout(pipe), toggle);
++	dev->irq_status = QT_TOKEN_GET_STATUS(token) &
++		(QT_TOKEN_STATUS_HALTED | QT_TOKEN_STATUS_DATBUFERR |
++		 QT_TOKEN_STATUS_BABBLEDET | QT_TOKEN_STATUS_XACTERR |
++		 QT_TOKEN_STATUS_MISSEDUFRAME);
++	dev->irq_act_len = queue->elementsize - QT_TOKEN_GET_TOTALBYTES(token);
++	if (!dev->irq_status) {
++		toggle = QT_TOKEN_GET_DT(token);
++		usb_settoggle(dev, usb_pipeendpoint(pipe), usb_pipeout(pipe), toggle);
++	}
+ 
+ 	if (!(cur->qh_link & QH_LINK_TERMINATE))
+ 		queue->current++;
+@@ -1548,16 +1555,14 @@
+ 	timeout = get_timer(0) + USB_TIMEOUT_MS(pipe);
+ 	while ((backbuffer = _ehci_poll_int_queue(dev, queue)) == NULL)
+ 		if (get_timer(0) > timeout) {
+-			printf("Timeout poll on interrupt endpoint\n");
++			if (!nonblock)
++				debug("Timeout poll on interrupt endpoint\n");
+ 			result = -ETIMEDOUT;
+ 			break;
+ 		}
+ 
+-	if (backbuffer != buffer) {
+-		debug("got wrong buffer back (%p instead of %p)\n",
+-		      backbuffer, buffer);
+-		return -EINVAL;
+-	}
++	if (!result && (backbuffer != buffer || dev->irq_status))
++		result = -EIO;
+ 
+ 	ret = _ehci_destroy_int_queue(dev, queue);
+ 	if (ret < 0)
+diff --git a/drivers/usb/host/ohci-hcd.c b/drivers/usb/host/ohci-hcd.c
+--- a/drivers/usb/host/ohci-hcd.c
++++ b/drivers/usb/host/ohci-hcd.c
+@@ -1649,9 +1649,11 @@
+ 		return NULL;
+ 
+ 	if (queue->urb[queue->curr_urb]->finished) {
+-		void *ret = queue->urb[queue->curr_urb]->transfer_buffer;
+-		queue->curr_urb++;
+-		return ret;
++		urb_priv_t *urb = queue->urb[queue->curr_urb++];
++
++		udev->irq_status = urb->status;
++		udev->irq_act_len = urb->actual_length;
++		return urb->transfer_buffer;
+ 	}
+ 
+ 	return NULL;

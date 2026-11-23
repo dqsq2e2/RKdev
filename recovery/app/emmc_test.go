@@ -44,6 +44,9 @@ func TestEmmcSysfsDetection(t *testing.T) {
 		if err := os.MkdirAll(base, 0755); err != nil {
 			t.Fatal(err)
 		}
+		if err := os.WriteFile(filepath.Join(root, card.name, "size"), []byte("30535680\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
 		for key, value := range map[string]string{
 			"type": card.kind, "name": "CUTB42\n", "life_time": "0x01 0x02\n",
 			"pre_eol_info": "0x01\n", "cid": "15010043555442343202a44747f56a00\n",
@@ -59,7 +62,7 @@ func TestEmmcSysfsDetection(t *testing.T) {
 	}
 	info := devices[0]
 	if info.Name != "CUTB42" || info.Status != "normal" || info.Device != "/dev/mmcblk0" ||
-		info.LifeB.Label != "已用 10%–20%" || info.CheckedAt == "" {
+		info.Capacity != 15634268160 || info.LifeB.Label != "已用 10%–20%" || info.CheckedAt == "" {
 		t.Fatalf("incorrect health: %+v", info)
 	}
 	if readEmmcHealth(root, "../mmcblk0") != nil {
@@ -67,8 +70,9 @@ func TestEmmcSysfsDetection(t *testing.T) {
 	}
 	// Missing health attributes must remain unknown, never synthesized as healthy.
 	os.Remove(filepath.Join(root, "mmcblk0/device/life_time"))
+	os.Remove(filepath.Join(root, "mmcblk0/size"))
 	info2 := readEmmcHealth(root, "mmcblk0")
-	if info2.Status != "unknown" || info2.LifeA.Raw != nil {
+	if info2.Status != "unknown" || info2.LifeA.Raw != nil || info2.Capacity != 0 {
 		t.Fatalf("missing values were treated as healthy: %+v", info2)
 	}
 }

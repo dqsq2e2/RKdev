@@ -1,0 +1,85 @@
+.settings-tabs,
+.settings-actions {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 10px 0;
+}
+.settings-tabs button.selected {
+    background: #336bc3;
+    color: #fff;
+    border-color: #336bc3;
+}
+.settings-fields {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(225px, 100%), 1fr));
+    gap: 12px;
+    border: 0;
+    padding: 0;
+    margin: 14px 0;
+}
+.setting-field {
+    display: flex;
+    align-items: start;
+    flex-direction: column;
+    gap: 5px;
+    min-width: 0;
+}
+.setting-field input:not([type="checkbox"]),
+.setting-field select,
+.setting-field textarea,
+.device-media select {
+    max-width: 100%;
+    box-sizing: border-box;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-card);
+    color: var(--text-primary);
+}
+.setting-field input:not([type="checkbox"]),
+.setting-field textarea { width: 100%; }
+.setting-field textarea { resize: vertical; }
+.settings-message { color: var(--text-muted); font-size: 0.9rem; overflow-wrap: anywhere; }
+.settings-error { color: #c85837; }
+.settings-trial:not([hidden]) {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin: 12px 0;
+    padding: 10px;
+    border: 1px solid #d2873d;
+    border-radius: 8px;
+}
+.device-media {
+    margin: 14px 0;
+    padding: 10px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+}
+.device-media summary { cursor: pointer; font-weight: 600; }
+.device-media-body { margin-top: 8px; }
+.device-file-list {
+    display: flex;
+    flex-direction: column;
+    max-height: 230px;
+    overflow: auto;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    padding: 4px;
+}
+.device-file-list span { padding: 6px 8px; }
+.device-file {
+    color: var(--text-primary);
+    background: transparent;
+    border: 0;
+    text-align: left;
+    padding: 6px 8px;
+    cursor: pointer;
+    overflow-wrap: anywhere;
+}
+.device-file:hover,.device-file:focus-visible { background: var(--bg-code); color: #fff; }
+.device-choices { display: grid; grid-template-columns: auto 1fr; gap: 5px 8px; margin: 12px 0; }
+.device-choices strong { overflow-wrap: anywhere; }

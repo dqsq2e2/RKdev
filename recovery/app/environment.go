@@ -178,6 +178,11 @@ func (l runtimeLayout) changeEnvironment(both, recoverCRC bool, change func(map[
 		return err
 	}
 	defer f.Close()
+	return l.changeEnvironmentOn(f, both, recoverCRC, nil, change)
+}
+
+func (l runtimeLayout) changeEnvironmentOn(f *os.File, both, recoverCRC bool, guard func() error,
+	change func(map[string]string) (map[string]string, error)) error {
 	active, err := l.readEnvironment(f)
 	if recoverCRC && errors.Is(err, errEnvironmentCRC) {
 		active = environment{values: map[string]string{}, bank: -1}
@@ -204,6 +209,11 @@ func (l runtimeLayout) changeEnvironment(both, recoverCRC bool, change func(map[
 			return err
 		}
 		offset := l.Environment.Offsets[active.bank]
+		if guard != nil {
+			if err := guard(); err != nil {
+				return err
+			}
+		}
 		if n, err := f.WriteAt(raw, offset); err != nil || n != len(raw) {
 			return fmt.Errorf("环境变量写入失败: %v", err)
 		}
@@ -226,28 +236,52 @@ func (l runtimeLayout) changeEnvironment(both, recoverCRC bool, change func(map[
 }
 
 func (l runtimeLayout) installationFlag(pending bool) error {
-	return l.changeEnvironment(pending, false, func(values map[string]string) (map[string]string, error) {
+	return l.changeEnvironment(pending, false, installFlagChange(pending))
+}
+
+func installFlagChange(pending bool) func(map[string]string) (map[string]string, error) {
+	return func(values map[string]string) (map[string]string, error) {
 		if pending {
 			values["rkdev_installing"] = "1"
 		} else {
 			delete(values, "rkdev_installing")
 		}
 		return values, nil
-	})
+	}
 }
 
 func (l runtimeLayout) protectedSystemHash() ([32]byte, error) {
-	var checksum [32]byte
 	f, err := os.Open(l.Device)
 	if err != nil {
-		return checksum, err
+		return [32]byte{}, err
 	}
 	defer f.Close()
+	return l.protectedSystemHashOn(f)
+}
+
+func (l runtimeLayout) protectedSystemHashOn(f io.ReaderAt) ([32]byte, error) {
+	var checksum [32]byte
 	start := int64(gptReservedSectors * 512)
 	h := sha256.New()
-	_, err = io.CopyN(h, io.NewSectionReader(f, start, l.System.Offset-start), l.System.Offset-start)
+	_, err := io.CopyN(h, io.NewSectionReader(f, start, l.System.Offset-start), l.System.Offset-start)
 	copy(checksum[:], h.Sum(nil))
 	return checksum, err
+}
+
+func (l runtimeLayout) beginSystemInstallOn(f *os.File, guard func() error) (func() error, error) {
+	if err := l.changeEnvironmentOn(f, true, false, guard, installFlagChange(true)); err != nil {
+		return nil, err
+	}
+	before, err := l.protectedSystemHashOn(f)
+	if err != nil {
+		return nil, err
+	}
+	return func() error {
+		if after, err := l.protectedSystemHashOn(f); err != nil || after != before {
+			return fmt.Errorf("刷写后 eMMC 保留区发生变化；继续保留未完成标记")
+		}
+		return l.changeEnvironmentOn(f, false, false, guard, installFlagChange(false))
+	}, nil
 }
 
 func (l runtimeLayout) beginSystemInstall() (func() error, error) {

@@ -1,0 +1,6 @@
+#!/bin/sh
+export TERM=linux
+if [ -e /etc/rkdev-display-enabled ]; then
+    /usr/bin/rkdev --display
+fi
+exec /sbin/getty 38400 tty1 linux

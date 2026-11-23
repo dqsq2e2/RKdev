@@ -2,6 +2,9 @@ package main
 
 import (
 	"crypto/tls"
+	"encoding/json"
+	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -11,6 +14,18 @@ import (
 	"strings"
 	"time"
 )
+
+func decodeSettingsRequest(w http.ResponseWriter, r *http.Request, dst any, limit int64) error {
+	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
+	d.DisallowUnknownFields()
+	if err := d.Decode(dst); err != nil {
+		return err
+	}
+	if err := d.Decode(new(any)); err != io.EOF {
+		return fmt.Errorf("JSON 请求包含额外数据")
+	}
+	return nil
+}
 
 func recoveryWeb(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -114,5 +129,6 @@ func handleProfile(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]any{
 		"board": currentLayout.Name, "profile": currentLayout.Profile, "writable": message == "",
 		"online_update": message == "" && currentLayout.ReleaseURL != "", "message": message,
+		"device": currentLayout.Device,
 	})
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -18,6 +19,7 @@ type EmmcLife struct {
 
 type EmmcHealth struct {
 	Device       string   `json:"device"`
+	Capacity     uint64   `json:"capacityBytes"`
 	Name         string   `json:"name"`
 	Manufacturer string   `json:"manufacturer"`
 	Serial       string   `json:"serial"`
@@ -110,6 +112,10 @@ func readEmmcHealth(sysRoot, name string) *EmmcHealth {
 	if read("type") != "MMC" {
 		return nil
 	}
+	var capacity uint64
+	if sectors, err := blockDeviceSectorsAt(sysRoot, name); err == nil && sectors <= math.MaxUint64/512 {
+		capacity = sectors * 512
+	}
 	life := strings.Fields(read("life_time"))
 	var a, b *uint8
 	if len(life) > 0 {
@@ -121,7 +127,7 @@ func readEmmcHealth(sysRoot, name string) *EmmcHealth {
 	eol := mmcByte(read("pre_eol_info"))
 	status, summary, eolLabel := emmcStatus(a, b, eol)
 	return &EmmcHealth{
-		Device: "/dev/" + name, Name: read("name"), Manufacturer: read("manfid"),
+		Device: "/dev/" + name, Capacity: capacity, Name: read("name"), Manufacturer: read("manfid"),
 		Serial: read("serial"), Firmware: read("fwrev"), Date: read("date"),
 		CID: read("cid"), Revision: read("rev"),
 		LifeA: emmcLife(a), LifeB: emmcLife(b), PreEOL: eol, PreEOLLabel: eolLabel,

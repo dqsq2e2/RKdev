@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -130,6 +131,10 @@ func adaptSystemBoot(task *FlashTask) error {
 }
 
 func adaptSystemBootPartitions(task *FlashTask, source []gptPartition) error {
+	return adaptSystemBootPartitionsOn(task, source, nil)
+}
+
+func adaptSystemBootPartitionsOn(task *FlashTask, source []gptPartition, target *streamTarget) error {
 	if err := validateBootClock(time.Now()); err != nil {
 		return err
 	}
@@ -143,37 +148,74 @@ func adaptSystemBootPartitions(task *FlashTask, source []gptPartition) error {
 	}
 	for _, part := range task.SystemPartitions {
 		device := fmt.Sprintf("%sp%d", task.TargetDev, part.Number)
-		out, err := exec.Command("blkid", "-p", "-s", "TYPE", "-o", "value", device).Output()
-		if err != nil {
-			continue
-		}
-		fsType := strings.TrimSpace(string(out))
-		switch fsType {
-		case "ext4", "btrfs", "vfat":
-		default:
-			continue
-		}
-		mountpoint, err := os.MkdirTemp("/tmp", "phx-system-boot-*")
-		if err != nil {
+		if target != nil && target.pinned {
+			if err := adaptPinnedPartition(device, target, mapping); err != nil {
+				return err
+			}
+		} else if err := adaptBootPartition(device, mapping); err != nil {
 			return err
 		}
-		if out, err := exec.Command("mount", device, mountpoint).CombinedOutput(); err != nil {
-			os.Remove(mountpoint)
-			return fmt.Errorf("挂载系统分区以适配引导失败: %v: %s", err, out)
+	}
+	return nil
+}
+
+func adaptPinnedPartition(device string, target *streamTarget, mapping map[int]bootPartitionRef) error {
+	if err := target.guard(); err != nil {
+		return err
+	}
+	id, err := identifyMedia("/sys/class/block", filepath.Base(device))
+	if err != nil {
+		return err
+	}
+	if filepath.Base(id.Parent) != filepath.Base(target.path) {
+		return fmt.Errorf("启动分区不属于目标盘")
+	}
+	f, err := os.OpenFile(device, os.O_RDWR|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if err := id.check(f); err != nil {
+		return err
+	}
+	if err := target.guard(); err != nil {
+		return err
+	}
+	return adaptBootPartition(fmt.Sprintf("/proc/%d/fd/%d", os.Getpid(), f.Fd()), mapping)
+}
+
+func adaptBootPartition(device string, mapping map[int]bootPartitionRef) error {
+	out, err := exec.Command("blkid", "-p", "-s", "TYPE", "-o", "value", device).Output()
+	if err != nil {
+		if exit, ok := err.(*exec.ExitError); ok && exit.ExitCode() == 2 {
+			return nil // no supported filesystem signature
 		}
-		adaptErr := adaptMountedBoot(mountpoint, mapping)
-		unmountOut, unmountErr := exec.Command("umount", mountpoint).CombinedOutput()
-		if unmountErr != nil {
-			return fmt.Errorf("卸载系统分区失败: %v: %s", unmountErr, unmountOut)
-		}
-		os.Remove(mountpoint)
-		if adaptErr != nil {
-			return adaptErr
-		}
-		if fsType == "ext4" {
-			if out, err := exec.Command("e2fsck", "-fn", device).CombinedOutput(); err != nil {
-				return fmt.Errorf("刷后启动文件系统检查失败，不能确认系统可启动: %v: %s", err, out)
-			}
+		return fmt.Errorf("无法检测写入后的启动分区: %w", err)
+	}
+	fsType := strings.TrimSpace(string(out))
+	switch fsType {
+	case "ext4", "btrfs", "vfat":
+	default:
+		return nil
+	}
+	mountpoint, err := os.MkdirTemp("/run", "rkdev-system-boot-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(mountpoint)
+	if err := syscall.Mount(device, mountpoint, fsType, syscall.MS_NOSUID|syscall.MS_NODEV|syscall.MS_NOEXEC, ""); err != nil {
+		return fmt.Errorf("挂载系统分区以适配引导失败: %w", err)
+	}
+	adaptErr := adaptMountedBoot(mountpoint, mapping)
+	if err := syscall.Unmount(mountpoint, 0); err != nil {
+		return fmt.Errorf("卸载系统分区失败: %w", err)
+	}
+	if adaptErr != nil {
+		return adaptErr
+	}
+	if fsType == "ext4" {
+		if out, err := exec.Command("e2fsck", "-fn", device).CombinedOutput(); err != nil {
+			return fmt.Errorf("刷后启动文件系统检查失败，不能确认系统可启动: %v: %s", err, out)
 		}
 	}
 	return nil

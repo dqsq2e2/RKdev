@@ -108,6 +108,10 @@ func rangeSHA(f io.ReaderAt, area region) (string, error) {
 }
 
 func validateReleaseImage(src io.ReaderAt, n int64, l runtimeLayout, m releaseManifest) error {
+	return validateReleaseImageWith(src, n, l, m, func() error { return validateRecoveryPayload(src, l) })
+}
+
+func validateReleaseImageWith(src io.ReaderAt, n int64, l runtimeLayout, m releaseManifest, checkPayload func() error) error {
 	if n != l.Capacity {
 		return fmt.Errorf("升级镜像容量不正确")
 	}
@@ -151,7 +155,7 @@ func validateReleaseImage(src io.ReaderAt, n int64, l runtimeLayout, m releaseMa
 	if err := l.checkRecoveryFS(src); err != nil {
 		return err
 	}
-	return validateRecoveryPayload(src, l)
+	return checkPayload()
 }
 
 func validateRecoveryPayload(src io.ReaderAt, l runtimeLayout) error {
@@ -165,7 +169,20 @@ func validateRecoveryPayload(src io.ReaderAt, l runtimeLayout) error {
 	if copyErr != nil || closeErr != nil {
 		return fmt.Errorf("无法暂存恢复分区: %v %v", copyErr, closeErr)
 	}
-	if err := exec.Command("e2fsck", "-fn", fs.Name()).Run(); err != nil {
+	return checkRecoveryPayload(context.Background(), fs.Name(), nil, l)
+}
+
+func checkRecoveryPayload(ctx context.Context, path string, device *os.File, l runtimeLayout) error {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	command := func(name string, args ...string) *exec.Cmd {
+		cmd := exec.CommandContext(ctx, name, append(args, path)...)
+		if device != nil {
+			cmd.ExtraFiles = []*os.File{device}
+		}
+		return cmd
+	}
+	if err := command("e2fsck", "-fn").Run(); err != nil {
 		return fmt.Errorf("恢复文件系统检查失败: %w", err)
 	}
 	kernel := "/Image"
@@ -173,12 +190,12 @@ func validateRecoveryPayload(src io.ReaderAt, l runtimeLayout) error {
 		kernel = "/Image.uimg"
 	}
 	for _, name := range []string{kernel, "/rkdev.dtb", "/initramfs.cpio.gz", "/extlinux/extlinux.conf"} {
-		out, err := exec.Command("debugfs", "-R", "stat "+name, fs.Name()).Output()
+		out, err := command("debugfs", "-R", "stat "+name).Output()
 		if err != nil || !bytes.Contains(out, []byte("Inode:")) {
 			return fmt.Errorf("恢复文件系统缺少 %s", name)
 		}
 	}
-	out, err := exec.Command("debugfs", "-R", "cat /layout.json", fs.Name()).Output()
+	out, err := command("debugfs", "-R", "cat /layout.json").Output()
 	if err != nil {
 		return err
 	}
@@ -208,6 +225,10 @@ func (l runtimeLayout) preservedReleaseHash(src io.ReaderAt) (string, error) {
 }
 
 func (l runtimeLayout) applyRecoveryUpgrade(src io.ReaderAt) error {
+	return l.applyRecoveryUpgradeGuarded(src, nil)
+}
+
+func (l runtimeLayout) applyRecoveryUpgradeGuarded(src io.ReaderAt, guard func(*os.File) error) error {
 	if err := l.checkMedium(true); err != nil {
 		return err
 	}
@@ -219,11 +240,21 @@ func (l runtimeLayout) applyRecoveryUpgrade(src io.ReaderAt) error {
 		return err
 	}
 	defer f.Close()
+	if guard != nil {
+		if err := guard(f); err != nil {
+			return err
+		}
+	}
 	before, err := l.preservedReleaseHash(f)
 	if err != nil {
 		return err
 	}
 	for _, area := range l.upgradeRegions() {
+		if guard != nil {
+			if err := guard(f); err != nil {
+				return err
+			}
+		}
 		advLog("info", "[UPDATE] 写入并读回区段 0x%x + 0x%x", area.Offset, area.Length)
 		if _, err := f.Seek(area.Offset, io.SeekStart); err != nil {
 			return err
