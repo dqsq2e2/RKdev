@@ -95,9 +95,18 @@ def copy_overlay(root, destination):
         shutil.copy2(item, target)
 
 
+def apply_source_patch(stage, patch):
+    env = os.environ.copy()
+    # An extracted tree isn't part of the repository that contains the build cache.
+    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE"):
+        env.pop(name, None)
+    env["GIT_CEILING_DIRECTORIES"] = str(stage.parent)
+    run(["git", "-c", "core.autocrlf=false", "apply", "--verbose", patch], cwd=stage, env=env)
+
+
 def source_key(board_root, board_path, cfg, data, component, lock):
     origin = {k: v for k, v in lock[component].items() if k != "archive"}
-    h = hashlib.sha256(canonical([2, data, cfg[component], origin]))
+    h = hashlib.sha256(canonical([3, data, cfg[component], origin]))
     files = [path_in(board_root, cfg[component]["config"]),
              path_in(board_root, cfg[component]["dts"])]
     if component == "uboot":
@@ -129,12 +138,11 @@ def stage_source(args, board_root, cfg, data, component, lock):
             entry = cfg[component]
             patch_dir = CORE / ("boot" if component == "uboot" else "recovery/kernel") / "patches"
             for patch in sorted(patch_dir.glob("*.patch")):
-                run(["git", "apply", patch], cwd=stage)
+                apply_source_patch(stage, patch)
             if "overlay" in entry:
                 copy_overlay(path_in(board_root, entry["overlay"], directory=True), stage)
             for patch in entry.get("patches", []):
-                run(["git", "apply", "--check", path_in(board_root, patch)], cwd=stage)
-                run(["git", "apply", path_in(board_root, patch)], cwd=stage)
+                apply_source_patch(stage, path_in(board_root, patch))
             dts = path_in(board_root, entry["dts"])
             require(dts.suffix == ".dts", "board device tree must end with .dts")
             config = path_in(board_root, entry["config"]).read_text()
