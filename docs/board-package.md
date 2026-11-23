@@ -35,7 +35,7 @@
 | profile 下的 `firmware`、`release_url` | 可选。前者把固件描述映射到 `/lib/firmware` 相对路径；后者是 HTTPS 上的板型升级清单 |
 | `rkfw` | SPI profile 的可选 Rockchip 原始分区引导：`kernel`、`initrd`、`resource`、`root` 为相应分区号，`args` 是额外的内核参数 |
 
-U-Boot 的启动 Logo、F2 恢复和 F10 引导菜单由 RKdev 提供。板包在 U-Boot 设备树的 VOP 节点用 `u-boot,hdmi` 列出实际连接的 HDMI 发射端，并为各端配置引脚以及所需的使能 GPIO。没有可用的 HDMI 显示器时，快捷键和菜单仍可通过串口使用。启用了 USB 主机的板也可用 USB 键盘。
+U-Boot 的启动 Logo、F2 恢复和 F10 引导菜单由 RKdev 提供。板包在 U-Boot 设备树的 VOP 节点用 `u-boot,hdmi` 列出实际连接的 HDMI 发射端，并为各端配置引脚以及所需的使能 GPIO。若板上有限制，可在发射端设置 `u-boot,preferred-vic`（例如 4 为 720p60），仅在显示器声明支持时优先选择该模式。没有可用的 HDMI 显示器时，快捷键和菜单仍可通过串口使用。启用了 USB 主机的板也可用 USB 键盘。
 
 布局以字节表示。容量、偏移、长度必须满足扇区或擦除块对齐，载荷不可重叠。eMMC v1 预留首尾 GPT，并使用 512 B 逻辑扇区。将较小恢复镜像写到较大 eMMC 后，须将备用 GPT 移到实际磁盘末尾；验收时以真实设备的两份 GPT 为准。G98 的 SPI 与 eMMC 引脚互斥属于实际板的电气配置。
 

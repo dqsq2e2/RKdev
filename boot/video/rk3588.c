@@ -162,6 +162,7 @@ struct rk3588_boot_video {
 	void __iomem *qp, *phy, *phy_grf;
 	void *fb;
 	unsigned int port;
+	u32 preferred_vic;
 	bool scanout, phy_started;
 };
 
@@ -308,6 +309,7 @@ static int qp_find_sink(struct udevice *video, struct rk3588_boot_video *p)
 			continue;
 		p->qp = addr;
 		p->port = port;
+		p->preferred_vic = dev_read_u32_default(tx, "u-boot,preferred-vic", 0);
 		p->phy = phandle_regs(hdmi, "phys");
 		p->phy_grf = phandle_regs(ofnode_parse_phandle(hdmi, "phys", 0),
 					  "rockchip,grf");
@@ -432,6 +434,9 @@ static const struct rk3588_hdmi_mode *qp_select_mode(struct rk3588_boot_video *p
 			i += len + 1;
 		}
 	}
+	for (unsigned int i = 0; i < ARRAY_SIZE(modes); i++)
+		if ((mask & BIT(i)) && modes[i].vic == p->preferred_vic)
+			return &modes[i];
 	for (unsigned int i = 0; i < ARRAY_SIZE(modes); i++)
 		if (mask & BIT(i))
 			return &modes[i];
