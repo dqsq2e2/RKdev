@@ -20,7 +20,9 @@
 #include <asm/cache.h>
 #include <asm/io.h>
 #include <dt-bindings/clock/rockchip,rk3588-cru.h>
+#include <asm/gpio.h>
 #include <linux/delay.h>
+#include <linux/err.h>
 #include <linux/iopoll.h>
 #include <video.h>
 #include "rk3588-hdptx.h"
@@ -280,6 +282,7 @@ static int qp_find_sink(struct udevice *video, struct rk3588_boot_video *p)
 		struct udevice *tx;
 		void __iomem *addr;
 		unsigned int port;
+		u32 val, timeout;
 
 		if (!ofnode_valid(hdmi) || !ofnode_is_enabled(hdmi) ||
 		    !ofnode_device_is_compatible(hdmi, "rockchip,rk3588-dw-hdmi-qp"))
@@ -292,14 +295,16 @@ static int qp_find_sink(struct udevice *video, struct rk3588_boot_video *p)
 		else
 			continue;
 
-		/* Probe selects the connector's default pin mux. */
+		/* Probe selects the pin mux and turns on any board-level output. */
 		if (uclass_get_device_by_ofnode(UCLASS_DISPLAY, hdmi, &tx))
 			continue;
 		gate_enable(73, BIT(12 + port));
 		hiword(p->grf + 0x31c, BIT(12 + port), BIT(12 + port));
 		/* The HPD pad is outside VO1 and can be checked headless. */
-		udelay(1000);
-		if (!(readl(p->grf + 0x384) & BIT(port ? 24 : 16)))
+		timeout = dev_read_bool(tx, "enable-gpios") ||
+			  dev_read_bool(tx, "frl-enable-gpios") ? 100000 : 1000;
+		if (readl_poll_timeout(p->grf + 0x384, val,
+				       val & BIT(port ? 24 : 16), timeout))
 			continue;
 		p->qp = addr;
 		p->port = port;
@@ -763,8 +768,24 @@ static const struct udevice_id rk3588_qp_ids[] = {
 	{ }
 };
 
+static int rk3588_qp_probe(struct udevice *dev)
+{
+	struct gpio_desc *gpio;
+
+	if (dev_read_bool(dev, "enable-gpios"))
+		gpio = devm_gpiod_get(dev, "enable", GPIOD_IS_OUT | GPIOD_IS_OUT_ACTIVE);
+	else if (dev_read_bool(dev, "frl-enable-gpios"))
+		/* This driver sends TMDS only; leave the FRL selector inactive. */
+		gpio = devm_gpiod_get(dev, "frl-enable", GPIOD_IS_OUT);
+	else
+		return 0;
+
+	return PTR_ERR_OR_ZERO(gpio);
+}
+
 U_BOOT_DRIVER(rkdev_rk3588_qp) = {
 	.name = "rkdev_rk3588_qp",
 	.id = UCLASS_DISPLAY,
 	.of_match = rk3588_qp_ids,
+	.probe = rk3588_qp_probe,
 };

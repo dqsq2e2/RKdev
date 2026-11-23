@@ -17,7 +17,7 @@ from pathlib import Path
 
 from contract import Invalid, canonical, fw_env_config, load_board, path_in, read_json, require, runtime, write_json
 from image import environment_text, pack, run, sha, verify
-from uboot import inject, profile_header, put_settings, settings
+from uboot import BOOT_UI_DISPLAY, BOOT_UI_USB, inject, profile_header, put_settings, settings
 
 CORE = Path(__file__).resolve().parents[1]
 ROOTFS = {
@@ -176,6 +176,9 @@ def build_uboot(args, root, board, cfg, data, lock):
     mandatory = {"CONFIG_TARGET_RKDEV_RK3588": "y", "CONFIG_BOARD_LATE_INIT": "y",
                  "CONFIG_CMD_SYSBOOT": "y", "CONFIG_HUSH_PARSER": "y",
                  ("CONFIG_ENV_IS_IN_MMC" if data["profile"] == "emmc" else "CONFIG_ENV_IS_IN_SPI_FLASH"): "y"}
+    mandatory.update({key: value for key, value in BOOT_UI_DISPLAY.items() if value == "y"})
+    if {"CONFIG_DM_USB=y", "CONFIG_USB_HOST=y"} <= selected:
+        mandatory.update(BOOT_UI_USB)
     for target, cmd in (("sata", "SCSI"), ("nvme", "NVME"), ("usb", "USB"), ("sd", "MMC"), ("emmc", "MMC")):
         if target in data["boot_order"]:
             mandatory[f"CONFIG_CMD_{cmd}"] = "y"
@@ -187,7 +190,8 @@ def build_uboot(args, root, board, cfg, data, lock):
         mandatory["CONFIG_CMD_ROCKUSB"] = "y"
     if cfg.get("key", {}).get("action") == "host-or-recovery":
         mandatory["CONFIG_USB_GADGET"] = "y"
-    require(all(f"{k}={v}" in selected for k, v in mandatory.items()), f"U-Boot lost required config: {mandatory}")
+    missing = [f"{k}={v}" for k, v in mandatory.items() if f"{k}={v}" not in selected]
+    require(not missing, f"U-Boot lost required config: {', '.join(missing)}")
     run([*make, f"-j{args.jobs}"], env=environment)
     artifact = out / ("u-boot-rockchip-spi.bin" if data["profile"] == "spi" else "u-boot-rockchip.bin")
     env = out / "u-boot-initial-env"

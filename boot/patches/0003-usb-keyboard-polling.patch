@@ -398,7 +398,7 @@ diff --git a/drivers/usb/host/ehci-hcd.c b/drivers/usb/host/ehci-hcd.c
 diff --git a/drivers/usb/host/ohci-hcd.c b/drivers/usb/host/ohci-hcd.c
 --- a/drivers/usb/host/ohci-hcd.c
 +++ b/drivers/usb/host/ohci-hcd.c
-@@ -1649,9 +1649,11 @@
+@@ -1649,9 +1649,14 @@
  		return NULL;
  
  	if (queue->urb[queue->curr_urb]->finished) {
@@ -407,8 +407,11 @@ diff --git a/drivers/usb/host/ohci-hcd.c b/drivers/usb/host/ohci-hcd.c
 -		return ret;
 +		urb_priv_t *urb = queue->urb[queue->curr_urb++];
 +
-+		udev->irq_status = urb->status;
++		/* Interrupt URBs have a single transfer descriptor. */
++		udev->irq_status = cc_to_error[TD_CC_GET(m32_swap(urb->td[0]->hwINFO))];
 +		udev->irq_act_len = urb->actual_length;
++		if (!udev->irq_status && udev->irq_act_len && usb_pipein(urb->pipe))
++			invalidate_dcache_buffer(urb->transfer_buffer, udev->irq_act_len);
 +		return urb->transfer_buffer;
  	}
  

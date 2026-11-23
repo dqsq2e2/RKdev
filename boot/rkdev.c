@@ -266,7 +266,6 @@ static bool skip_emmc_system(void)
 		(!layout_env || (pending && *pending && strcmp(pending, "0")));
 }
 
-#ifdef CONFIG_USB_KEYBOARD_FN_KEYS
 enum { UI_NONE, UI_F2 = 0x100, UI_F10, UI_UP, UI_DOWN, UI_ESCAPE };
 
 static int rkdev_key_from(struct stdio_dev *io, bool serial)
@@ -311,7 +310,7 @@ static int rkdev_key(void)
 	struct stdio_dev *io;
 	int key = rkdev_key_from(stdio_get_by_name("serial"), true);
 
-	if (key)
+	if (key || !IS_ENABLED(CONFIG_USB_KEYBOARD_FN_KEYS))
 		return key;
 	list_for_each_entry(io, stdio_get_list(), list) {
 		if (strncmp(io->name, "usbkbd", 6))
@@ -431,7 +430,8 @@ static void rkdev_boot_keys(void)
 	int key;
 
 	/* Only start host controllers after the board-specific download check. */
-	run_command("usb start", 0);
+	if (IS_ENABLED(CONFIG_USB_KEYBOARD_FN_KEYS))
+		run_command("usb start", 0);
 	printf("RKdev: %s\n", hint);
 	rkdev_screen_hint(hint);
 	start = get_timer(0);
@@ -451,9 +451,6 @@ static void rkdev_boot_keys(void)
 		udelay(5000);
 	} while (get_timer(start) < 3000);
 }
-#else
-static void rkdev_boot_keys(void) { }
-#endif
 
 static void boot_recovery(void)
 {

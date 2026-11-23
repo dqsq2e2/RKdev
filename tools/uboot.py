@@ -3,6 +3,22 @@ import re
 
 from contract import require
 
+BOOT_UI_DISPLAY = {
+    "CONFIG_VIDEO": "y",
+    "CONFIG_VIDEO_ROCKCHIP_RK3588_HDMI": "y",
+    "CONFIG_CMD_BMP": "y",
+    "CONFIG_VIDEO_BMP_GZIP": "y",
+    "CONFIG_BMP_24BPP": "y",
+    "CONFIG_SYS_WHITE_ON_BLACK": "y",
+    "CONFIG_VIDEO_LOGO": "n",
+}
+BOOT_UI_USB = {
+    "CONFIG_CMD_USB": "y",
+    "CONFIG_USB_KEYBOARD": "y",
+    "CONFIG_USB_KEYBOARD_FN_KEYS": "y",
+    "CONFIG_SYS_USB_EVENT_POLL_VIA_INT_QUEUE": "y",
+}
+
 SCAN = (
     "if part list ${devtype} ${devnum} rkdev_parts; then "
     "for p in ${rkdev_parts}; do setenv rkdev_label; part name ${devtype} ${devnum} 0x${p} rkdev_label; "
@@ -20,6 +36,8 @@ SCAN = (
 def settings(config, data):
     env = data["environment"]
     settings = {
+        **BOOT_UI_DISPLAY,
+        **BOOT_UI_USB,
         "CONFIG_TARGET_RKDEV_RK3588": "y",
         "CONFIG_USE_BOOTCOMMAND": "y",
         "CONFIG_BOOTCOMMAND": '"rkdevboot"',
@@ -209,11 +227,12 @@ int board_late_init(void)""", 1).replace(marker, """#if IS_ENABLED(CONFIG_TARGET
         f.write("""
 config VIDEO_ROCKCHIP_RK3588_HDMI
 	bool "RK3588 HDMI boot framebuffer"
-	depends on VIDEO && ROCKCHIP_RK3588
+	depends on VIDEO && ROCKCHIP_RK3588 && DM_GPIO
 	select DISPLAY
 	depends on !VIDEO_COPY
 	select VIDEO_BPP32
 	help
 	  Enable the RK3588 VOP2 HDMI output for the boot logo and menu.
 	  The U-Boot DT lists usable transmitters under u-boot,hdmi on the VOP.
+	  A transmitter can use enable-gpios or frl-enable-gpios to set up TMDS.
 """)
