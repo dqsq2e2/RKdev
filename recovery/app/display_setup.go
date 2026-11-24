@@ -1,5 +1,3 @@
-//go:build !rkdev_nodisplay
-
 package main
 
 import (

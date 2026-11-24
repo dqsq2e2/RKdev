@@ -156,6 +156,106 @@ func TestBackupGPTProtection(t *testing.T) {
 	}
 }
 
+func TestRelocatePackagedGPT(t *testing.T) {
+	l := testEmmcLayout()
+	sectors := uint64(l.Capacity/512) + 262144
+	for _, scenario := range []string{"fresh", "interrupted", "foreign recovery", "conflicting backup"} {
+		t.Run(scenario, func(t *testing.T) {
+			root := t.TempDir()
+			disk := filepath.Join(root, "larger.img")
+			image := filepath.Join(root, "recovery.img")
+			sparseDisk(t, image, l.Capacity, "-o",
+				"-n", "1:65536:524253", "-c", "1:"+l.Recovery.Label,
+				"-n", "2:524288:1048542", "-c", "2:"+l.System.Label)
+			initial, err := os.Open(image)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer initial.Close()
+			head, tail := make([]byte, 34*512), make([]byte, gptBackupSectors*512)
+			if _, err := initial.ReadAt(head, 0); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := initial.ReadAt(tail, l.Capacity-int64(len(tail))); err != nil {
+				t.Fatal(err)
+			}
+			args := []string{"-o", "-n", "1:2048:4095"}
+			if scenario == "conflicting backup" {
+				args = append(args, "-U", gptGUID(head[512+56:512+72]))
+			}
+			sparseDisk(t, disk, int64(sectors*512), args...)
+			f, err := os.OpenFile(disk, os.O_RDWR, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer f.Close()
+			put := func(data []byte, off int64) {
+				t.Helper()
+				if _, err := f.WriteAt(data, off); err != nil {
+					t.Fatal(err)
+				}
+			}
+			put(head, 0)
+			if scenario == "interrupted" {
+				copy(tail, bytes.Repeat([]byte{0xcc}, len(tail)))
+			}
+			oldTail := l.Capacity - int64(len(tail))
+			put(tail, oldTail)
+			recovery := make([]byte, 1024)
+			binary.LittleEndian.PutUint16(recovery[56:], 0xef53)
+			id, _ := hex.DecodeString(l.LayoutID[:32])
+			if scenario != "foreign recovery" {
+				copy(recovery[104:], id)
+			}
+			copy(recovery[120:], l.Recovery.Label)
+			put(recovery, l.Recovery.Offset+1024)
+			env, err := encodeEnvironment(map[string]string{"rkdev_layout": l.LayoutID, "bootcmd": "rkdevboot",
+				"rkdev_installing": "1"}, int(l.Environment.Size), true, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			put(env, l.Environment.Offsets[0])
+			loader := []byte("bootloader")
+			put(loader, l.Loader.Offset)
+			if err := checkPhysicalGPT(f, sectors); err == nil {
+				t.Fatal("system write enabled while the backup is still in the image area")
+			}
+			want, err := readGPTReader(initial)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fixed, err := l.relocatePackagedGPT(f, sectors, nil)
+			if scenario == "foreign recovery" || scenario == "conflicting backup" {
+				if fixed || err == nil {
+					t.Fatal("unsafe repair accepted")
+				}
+				return
+			}
+			if err != nil || !fixed {
+				t.Fatalf("could not repair GPT: %v", err)
+			}
+			// A subsequent write can cross the old backup without damaging the new one.
+			put(bytes.Repeat([]byte{0x5a}, len(tail)), oldTail)
+			if err := checkPhysicalGPT(f, sectors); err != nil {
+				t.Fatal(err)
+			}
+			if got, err := readGPTReader(f); err != nil || !sameGPT(want, got) {
+				t.Fatalf("repair changed the partitions: %v %v", got, err)
+			}
+			for off, data := range map[int64][]byte{l.Loader.Offset: loader,
+				l.Environment.Offsets[0]: env, l.Recovery.Offset + 1024: recovery} {
+				got := make([]byte, len(data))
+				if _, err := f.ReadAt(got, off); err != nil || !bytes.Equal(got, data) {
+					t.Fatalf("repair changed protected bytes at %d", off)
+				}
+			}
+			if fixed, err := l.relocatePackagedGPT(f, sectors, nil); err != nil || fixed {
+				t.Fatalf("valid physical GPT was not left alone: %v", err)
+			}
+		})
+	}
+}
+
 func TestProtectedTargetAndEnvironment(t *testing.T) {
 	for _, target := range []string{"/dev/mmcblk0p1", "/dev/mmcblk0boot0", "/dev/mtdblock0", "/dev/sda1"} {
 		if validateFlashTarget(target) == nil {

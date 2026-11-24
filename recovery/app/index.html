@@ -118,7 +118,7 @@
         button.primary { background: var(--accent); color: #fff; border: none; cursor: pointer; }
         button.primary:disabled { background: #999; cursor: not-allowed; }
         button.refresh-btn { background: var(--bg-info); color: var(--accent); border: 1px solid var(--accent-border); cursor: pointer; }
-        #device-select { min-width: 350px; font-family: monospace; font-size: 13px; }
+        #device-select { min-width: min(350px, 100%); max-width: 100%; font-family: monospace; font-size: 13px; }
 
         .progress-container { margin-top: 25px; display: none; text-align: left; }
         .progress-bar-outer { width: 100%; height: 30px; background: var(--bar-bg); border-radius: 15px; overflow: hidden; position: relative; }
@@ -567,7 +567,7 @@
             .nav-actions { flex-wrap: wrap; }
             .footer-line { flex-wrap: wrap; justify-content: center; gap: 6px; font-size: 11px; }
             .footer { padding: 8px 12px; }
-            .boot-card, .storage-card, .update-card { padding: 24px; }
+            .card, .boot-card, .storage-card, .update-card { padding: 24px; }
             body { padding-bottom: 85px; }
         }
     </style>
@@ -1024,7 +1024,7 @@
             <div class="boot-actions"><button class="btn-boot-save" id="recovery-submit" type="submit">上传并升级</button></div>
         </form>
         <details class="device-media" data-media="upgrade">
-            <summary>从设备存储选择升级文件</summary>
+            <summary>从设备存储更新</summary>
             <div class="device-media-body"></div>
         </details>
         <p id="recovery-result" class="update-status" role="status" aria-live="polite"></p>

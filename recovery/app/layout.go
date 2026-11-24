@@ -203,7 +203,7 @@ func (l runtimeLayout) checkRecoveryFS(src io.ReaderAt) error {
 // A freshly written image can have its backup GPT at the image boundary.
 // Accept that boundary as long as both copies agree and fit the physical disk.
 func checkGPTCopies(f io.ReaderAt, sectors uint64) error {
-	p, b := make([]byte, 512), make([]byte, 512)
+	p := make([]byte, 512)
 	if _, err := f.ReadAt(p, 512); err != nil {
 		return err
 	}
@@ -215,67 +215,115 @@ func checkGPTCopies(f io.ReaderAt, sectors uint64) error {
 	if u64(p[24:]) != 1 || last >= sectors || last < 67 || u64(p[40:]) < 34 || u64(p[48:]) >= last-32 {
 		return fmt.Errorf("GPT 容量或保留区无效")
 	}
-	if _, err := f.ReadAt(b, int64(last*512)); err != nil {
+	b, err := readBackupGPT(f, last)
+	if err != nil {
 		return err
 	}
-	size := binary.LittleEndian.Uint32(b[12:])
-	backupEntries := u64(b[72:])
-	if string(b[:8]) != "EFI PART" || size < 92 || size > 512 || u64(b[24:]) != last || u64(b[32:]) != 1 ||
-		backupEntries != last-32 || !bytes.Equal(b[40:72], p[40:72]) || !bytes.Equal(b[80:92], p[80:92]) {
+	if !bytes.Equal(b[40:72], p[40:72]) || !bytes.Equal(b[80:92], p[80:92]) {
 		return fmt.Errorf("GPT 主副本不一致")
-	}
-	check := binary.LittleEndian.Uint32(b[16:])
-	clear(b[16:20])
-	if crc32.ChecksumIEEE(b[:size]) != check {
-		return fmt.Errorf("备份 GPT 表头 CRC 无效")
-	}
-	entries := make([]byte, int(binary.LittleEndian.Uint32(p[80:]))*128)
-	if _, err := f.ReadAt(entries, int64(backupEntries*512)); err != nil || crc32.ChecksumIEEE(entries) != binary.LittleEndian.Uint32(p[88:]) {
-		return fmt.Errorf("备份 GPT 分区表 CRC 无效")
 	}
 	return nil
 }
 
-func (l runtimeLayout) checkMedium(idle bool) error {
+var errInvalidBackupGPT = errors.New("备份 GPT 无效")
+
+func readBackupGPT(f io.ReaderAt, last uint64) ([]byte, error) {
+	b := make([]byte, 512)
+	if _, err := f.ReadAt(b, int64(last*512)); err != nil {
+		return nil, err
+	}
+	u64, u32 := binary.LittleEndian.Uint64, binary.LittleEndian.Uint32
+	size := u32(b[12:])
+	backupEntries := u64(b[72:])
+	count := u32(b[80:])
+	if last < 67 || string(b[:8]) != "EFI PART" || size < 92 || size > 512 ||
+		u64(b[24:]) != last || u64(b[32:]) != 1 || backupEntries != last-32 ||
+		u64(b[40:]) < 34 || u64(b[48:]) >= backupEntries || count == 0 || count > 128 || u32(b[84:]) != 128 {
+		return nil, fmt.Errorf("%w: 表头格式错误", errInvalidBackupGPT)
+	}
+	check := u32(b[16:])
+	clear(b[16:20])
+	if crc32.ChecksumIEEE(b[:size]) != check {
+		return nil, fmt.Errorf("%w: 表头 CRC 不匹配", errInvalidBackupGPT)
+	}
+	entries := make([]byte, int(count)*128)
+	if _, err := f.ReadAt(entries, int64(backupEntries*512)); err != nil {
+		return nil, err
+	}
+	if crc32.ChecksumIEEE(entries) != u32(b[88:]) {
+		return nil, fmt.Errorf("%w: 分区表 CRC 不匹配", errInvalidBackupGPT)
+	}
+	return b, nil
+}
+
+func checkPhysicalGPT(f io.ReaderAt, sectors uint64) error {
+	if err := checkGPTCopies(f, sectors); err != nil {
+		return err
+	}
+	var alternate [8]byte
+	if _, err := f.ReadAt(alternate[:], 512+32); err != nil {
+		return err
+	}
+	if binary.LittleEndian.Uint64(alternate[:]) != sectors-1 {
+		return fmt.Errorf("eMMC 备份 GPT 尚未迁移至盘尾")
+	}
+	return nil
+}
+
+func (l runtimeLayout) checkMediumGeometry(idle bool) (uint64, error) {
 	if identityError != nil {
-		return identityError
+		return 0, identityError
 	}
 	info, err := os.Lstat(l.Device)
 	if err != nil || info.Mode()&os.ModeDevice == 0 || info.Mode()&os.ModeCharDevice != 0 {
-		return fmt.Errorf("找不到布局指定的块设备 %s", l.Device)
+		return 0, fmt.Errorf("找不到布局指定的块设备 %s", l.Device)
 	}
 	name := filepath.Base(l.Device)
 	block := "/sys/class/block/" + name
 	if err := checkBlockDeviceIdentity(info, block); err != nil {
-		return err
+		return 0, err
 	}
 	sectors, err := blockDeviceSectors(l.Device)
 	if err != nil || sectors < uint64(l.Capacity/512) || sectors > 1<<40/512 {
-		return fmt.Errorf("介质容量与板包不匹配")
+		return 0, fmt.Errorf("介质容量与板包不匹配")
 	}
 	if idle {
 		if err := checkBlockIdle(l.Device); err != nil {
-			return err
+			return 0, err
 		}
 	}
-	f, err := os.Open(l.Device)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
 	if l.Profile == "spi" {
 		mtd := "/sys/class/mtd/mtd" + strings.TrimPrefix(name, "mtdblock")
 		erase := sysInt(mtd + "/erasesize")
 		if sysValue(mtd+"/type") != "nor" || sysValue(mtd+"/name") != l.MTDName ||
 			sectors != uint64(l.Capacity/512) || sysInt(mtd+"/size") != l.Capacity ||
 			erase < 512 || l.EraseSize%erase != 0 || sysValue(mtd+"/numeraseregions") != "0" {
-			return fmt.Errorf("SPI NOR 名称、容量或擦除几何不匹配")
+			return 0, fmt.Errorf("SPI NOR 名称、容量或擦除几何不匹配")
 		}
 	} else {
 		if sysValue(block+"/device/type") != "MMC" || sysInt(block+"/queue/logical_block_size") != 512 {
-			return fmt.Errorf("设备不是预期的 512 字节扇区 eMMC")
+			return 0, fmt.Errorf("设备不是预期的 512 字节扇区 eMMC")
 		}
-		if err := checkGPTCopies(f, sectors); err != nil {
+		if sysInt(block+"/"+name+"p1/start") != l.Recovery.Offset/512 ||
+			sysInt(block+"/"+name+"p1/size") != l.Recovery.Length/512 {
+			return 0, fmt.Errorf("内核分区表与板包不匹配")
+		}
+	}
+	return sectors, nil
+}
+
+func (l runtimeLayout) checkMedium(idle bool) error {
+	sectors, err := l.checkMediumGeometry(idle)
+	if err != nil {
+		return err
+	}
+	f, err := os.Open(l.Device)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if l.Profile == "emmc" {
+		if err := checkPhysicalGPT(f, sectors); err != nil {
 			return err
 		}
 		parts, err := readGPTReader(f)
@@ -284,10 +332,6 @@ func (l runtimeLayout) checkMedium(idle bool) error {
 		}
 		if _, err := l.recoveryPartition(parts); err != nil {
 			return err
-		}
-		if sysInt(block+"/"+name+"p1/start") != l.Recovery.Offset/512 ||
-			sysInt(block+"/"+name+"p1/size") != l.Recovery.Length/512 {
-			return fmt.Errorf("内核分区表与板包不匹配")
 		}
 	}
 	return l.checkRecoveryFS(f)

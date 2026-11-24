@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"syscall"
@@ -14,6 +17,118 @@ import (
 )
 
 const pinnedEntryCount = 128
+
+type writableGPT interface {
+	io.ReaderAt
+	io.WriterAt
+}
+
+// Recover the packed RKdev layout on a larger eMMC, including an interrupted
+// system write that overwrote the old backup. Leave custom or conflicting
+// partition tables in diagnostic mode.
+func (l runtimeLayout) relocatePackagedGPT(f writableGPT, sectors uint64, guard func() error) (bool, error) {
+	if err := checkPhysicalGPT(f, sectors); err == nil {
+		return false, nil
+	}
+	var p [512]byte
+	if _, err := f.ReadAt(p[:], 512); err != nil {
+		return false, err
+	}
+	u64, u32 := binary.LittleEndian.Uint64, binary.LittleEndian.Uint32
+	imageLast := uint64(l.Capacity/512) - 1
+	if sectors <= imageLast+1 || u64(p[24:]) != 1 || u64(p[32:]) != imageLast ||
+		u64(p[40:]) != 34 || u64(p[48:]) != imageLast-gptBackupSectors || u32(p[80:]) != pinnedEntryCount {
+		return false, fmt.Errorf("eMMC 主 GPT 不符合初始镜像几何")
+	}
+	parts, err := readGPTReader(f)
+	if err != nil {
+		return false, err
+	}
+	if _, err := l.recoveryPartition(parts); err != nil {
+		return false, err
+	}
+	const linuxData = "0fc63daf-8483-4772-8e79-3d69d8477de4"
+	if len(parts) != 2 || parts[0].Type != linuxData || parts[0].Attributes != 0 ||
+		parts[1].Number != 2 || parts[1].Start != l.startSector() || parts[1].End != imageLast-gptBackupSectors ||
+		parts[1].Name != l.System.Label || parts[1].Type != linuxData || parts[1].Attributes != 0 {
+		return false, fmt.Errorf("eMMC 分区表不符合初始镜像布局")
+	}
+	if err := l.checkRecoveryFS(f); err != nil {
+		return false, err
+	}
+	if _, err := l.readEnvironment(f); err != nil {
+		return false, err
+	}
+	for _, last := range []uint64{imageLast, sectors - 1} {
+		b, err := readBackupGPT(f, last)
+		if err != nil {
+			if !errors.Is(err, errInvalidBackupGPT) {
+				return false, err
+			}
+			continue
+		}
+		if bytes.Equal(b[56:72], p[56:72]) && !bytes.Equal(b[80:92], p[80:92]) {
+			return false, fmt.Errorf("发现同一磁盘的有效但冲突的备份 GPT")
+		}
+	}
+	if err := rewritePinnedGPT(f, sectors, nil, false, guard); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (l runtimeLayout) prepareEMMCGPT() error {
+	if l.Profile != "emmc" {
+		return nil
+	}
+	sectors, err := l.checkMediumGeometry(false)
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(l.Device, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	err = checkPhysicalGPT(f, sectors)
+	f.Close()
+	if err == nil || sectors == uint64(l.Capacity/512) {
+		return err
+	}
+	f, err = os.OpenFile(l.Device, os.O_RDWR|os.O_SYNC|syscall.O_NOFOLLOW|syscall.O_EXCL, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	guard := func() error {
+		info, err := f.Stat()
+		if err != nil {
+			return err
+		}
+		if err := checkBlockDeviceIdentity(info, "/sys/class/block/"+filepath.Base(l.Device)); err != nil {
+			return err
+		}
+		now, err := l.checkMediumGeometry(true)
+		if err != nil {
+			return err
+		}
+		if now != sectors {
+			return fmt.Errorf("eMMC 容量已改变")
+		}
+		return nil
+	}
+	if err := guard(); err != nil {
+		return err
+	}
+	fixed, err := l.relocatePackagedGPT(f, sectors, guard)
+	if err != nil || !fixed {
+		return err
+	}
+	if err := rereadPinnedGPT(f); err != nil {
+		return err
+	}
+	advLog("info", "eMMC 主、副 GPT 已迁移并校验")
+	return nil
+}
 
 func writeGPTGuid(dst []byte, guid string) error {
 	buf, err := hex.DecodeString(strings.ReplaceAll(guid, "-", ""))
@@ -29,10 +144,7 @@ func writeGPTGuid(dst []byte, guid string) error {
 
 // Keep the physical device pinned after writing the image. Partition tools
 // that canonicalize /proc/.../fd/N may reopen a replacement device by name.
-func rewritePinnedGPT(f interface {
-	io.ReaderAt
-	io.WriterAt
-}, sectors uint64, parts []gptPartition, project bool, guard func() error) error {
+func rewritePinnedGPT(f writableGPT, sectors uint64, parts []gptPartition, project bool, guard func() error) error {
 	existing, err := readGPTReader(f)
 	if err != nil {
 		return err
@@ -122,6 +234,9 @@ func rewritePinnedGPT(f interface {
 	}{
 		{backupEntries, entries}, {last, backup[:]}, {2, entries}, {1, primary[:]}, {0, mbr[:]},
 	} {
+		if extent.lba == 2 && !project {
+			continue // The primary entry array is already valid and unchanged.
+		}
 		if guard != nil {
 			if err := guard(); err != nil {
 				return err
@@ -131,7 +246,7 @@ func rewritePinnedGPT(f interface {
 			return err
 		}
 	}
-	if err := checkGPTCopies(f, sectors); err != nil {
+	if err := checkPhysicalGPT(f, sectors); err != nil {
 		return err
 	}
 	got, err := readGPTReader(f)

@@ -1,5 +1,6 @@
 ::sysinit:/usr/sbin/rkdev-start
 ::respawn:/usr/bin/rkdev
+tty1::respawn:/usr/sbin/rkdev-display
 ::askfirst:-/bin/sh
 ::shutdown:/bin/sync
 ::shutdown:/bin/umount -a -r

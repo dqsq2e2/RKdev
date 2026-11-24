@@ -481,9 +481,14 @@ func main() {
 	currentLayout, identityError = loadRuntime()
 	if identityError != nil {
 		log.Printf("RKdev diagnostic mode: %v", identityError)
-	} else if err := currentLayout.checkMedium(false); err == nil {
-		if err := os.WriteFile("/run/rkdev-fw_env.config", []byte(currentLayout.envConfig()), 0600); err != nil {
-			log.Print(err)
+	} else {
+		if err := currentLayout.prepareEMMCGPT(); err != nil {
+			log.Printf("eMMC GPT: %v", err)
+		}
+		if err := currentLayout.checkMedium(false); err == nil {
+			if err := os.WriteFile("/run/rkdev-fw_env.config", []byte(currentLayout.envConfig()), 0600); err != nil {
+				log.Print(err)
+			}
 		}
 	}
 	netConfigController = startNetworkController()

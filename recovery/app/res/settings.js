@@ -270,6 +270,33 @@
         }
     }
 
+    const mediaIcons = {
+        refresh: 'M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8M21 3v5h-5M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16M8 16H3v5',
+        parent: 'M12 19V5m-7 7 7-7 7 7',
+        folder: 'M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.7-1l-.8-1a2 2 0 0 0-1.7-1H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z',
+        file: 'M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7ZM14 2v6h6',
+        chevron: 'm9 18 6-6-6-6',
+        check: 'm20 6-11 11-5-5'
+    };
+    function mediaIcon(name) {
+        const ns = 'http://www.w3.org/2000/svg';
+        const svg = document.createElementNS(ns, 'svg');
+        const path = document.createElementNS(ns, 'path');
+        for (const [key, value] of Object.entries({viewBox:'0 0 24 24', fill:'none',
+            stroke:'currentColor', 'stroke-width':'1.7', 'stroke-linecap':'round',
+            'stroke-linejoin':'round', 'aria-hidden':'true'})) svg.setAttribute(key, value);
+        path.setAttribute('d', mediaIcons[name]);
+        svg.append(path);
+        return svg;
+    }
+    function mediaTool(icon, label, action) {
+        const control = button('', action, 'device-media-tool');
+        control.title = label;
+        control.setAttribute('aria-label', label);
+        control.append(mediaIcon(icon));
+        return control;
+    }
+
     class DeviceFiles {
         constructor(details) {
             this.details = details;
@@ -279,69 +306,105 @@
             this.msg = status();
             this.progress = status();
             this.constraint = status();
-            this.vol = select([['','选择分区']], '', () => this.selectVolume());
+            this.vol = select([], '', () => this.selectVolume());
+            this.vol.setAttribute('aria-label', '来源分区');
             this.list = tag('div', '', 'device-file-list');
-            this.path = tag('span', '/');
+            this.path = tag('span', '/', 'device-directory-path');
             this.targets = select([['','请先选择来源分区']], '');
-            this.image = tag('strong', '未选镜像');
-            this.meta = tag('strong', '未选清单');
-            this.submit = button(upgrade ? '从设备升级' : '从设备刷写', () => this.start(), 'btn-boot-save');
+            this.targets.setAttribute('aria-label', '写入目标');
+            this.image = tag('dd', '未选择文件');
+            this.meta = tag('dd', '未选择文件');
+            this.submit = button(upgrade ? '升级恢复系统' : '开始刷写', () => this.start(), 'btn-boot-save');
             this.submit.disabled = true;
-            this.refresh = button('刷新存储', () => this.load());
-            const source = tag('div', '', 'settings-actions');
-            source.append(this.vol, this.refresh);
-            const path = tag('div', '', 'settings-actions');
-            path.append(button('上一级', () => this.parent()), this.path);
-            const selections = tag('div', '', 'device-choices');
-            selections.append(tag('span', '镜像：'), this.image);
-            if (upgrade) selections.append(tag('span','配套清单：'), this.meta);
-            this.body.append(source, path, this.list, selections);
+            this.refresh = mediaTool('refresh', '刷新存储', () => this.load());
+            this.up = mediaTool('parent', '上一级', () => this.parent());
+            const source = tag('div', '', 'device-source');
+            source.append(field('来源分区', this.vol), this.refresh);
+            const path = tag('div', '', 'device-directory');
+            path.append(this.up, this.path);
+            const files = tag('div', '', 'device-browser');
+            files.append(path, this.list);
+            const selections = tag('dl', '', 'device-choices');
+            selections.append(tag('dt', '镜像'), this.image);
+            if (upgrade) selections.append(tag('dt', '校验清单'), this.meta);
+            const actions = tag('div', '', 'device-actions');
             if (!upgrade) {
-                this.body.append(field('写入目标', this.targets),
-                    tag('p','来源所在的整块盘及其所有分区不能作为写入目标。', 'settings-message'));
+                actions.append(field('写入目标', this.targets));
                 this.targets.addEventListener('change', () => this.validate());
-            } else {
-                this.body.append(tag('p','请从另一块盘选择同一版本的 IMG 和 JSON。', 'settings-message'));
             }
-            this.body.append(this.submit, this.msg, this.constraint, this.progress);
+            actions.append(this.submit);
+            this.body.append(source, files, selections, actions, this.msg, this.constraint, this.progress);
+            this.volumes = [];
+            this.targetList = [];
             this.dir = '.';
             this.seq = 0;
+            this.selection = 0;
+            this.emptyList('请选择来源分区');
+            this.validate();
             details.addEventListener('toggle', () => { if (details.open && !this.loaded) this.load(); });
+        }
+
+        emptyList(text) {
+            this.list.replaceChildren(tag('p', text, 'device-file-empty'));
+        }
+
+        showDirectory(dir) {
+            this.dir = dir;
+            this.path.textContent = dir === '.' ? '/' : '/' + dir;
+            this.path.title = this.path.textContent;
         }
 
         async load() {
             const seq = ++this.seq;
+            ++this.selection;
+            this.loadingVolumes = true;
             this.volume = null;
+            this.volumes = [];
+            this.targetList = [];
+            this.upgradeAllowed = false;
             message(this.constraint, '');
+            message(this.msg, '');
             this.setSelected();
-            this.vol.replaceChildren(new Option('选择来源分区', ''));
-            this.list.replaceChildren();
+            this.vol.replaceChildren(new Option('正在读取…', ''));
+            this.emptyList('正在读取存储设备…');
             this.targets.replaceChildren(new Option('请先选择来源分区', ''));
-            this.path.textContent = '/';
+            this.showDirectory('.');
             this.validate();
             try {
                 const volumes = await api('media');
                 if (seq !== this.seq) return;
                 this.loaded = true;
                 this.volumes = volumes;
+                this.vol.replaceChildren(new Option(volumes.length ? '选择分区' : '没有可读的分区', ''));
                 for (const v of volumes) this.vol.add(new Option('/dev/' + v.name + ' · ' + v.size, v.id));
-                message(this.msg, volumes.length === 0 ? '未发现可读取的设备，请插入存储后刷新。' : '');
-            } catch (e) { if (seq === this.seq) message(this.msg, e.message, true); }
+                this.emptyList(volumes.length ? '请选择来源分区' : '未发现可读的分区');
+            } catch (e) {
+                if (seq !== this.seq) return;
+                this.vol.replaceChildren(new Option('读取失败', ''));
+                this.emptyList('读取失败');
+                message(this.msg, e.message, true);
+            } finally {
+                if (seq === this.seq) {
+                    this.loadingVolumes = false;
+                    this.validate();
+                }
+            }
         }
 
         async selectVolume() {
+            const selection = ++this.selection;
             this.volume = this.volumes.find(v => v.id === this.vol.value);
             this.setSelected();
-            this.targets.replaceChildren(new Option('选择写入目标', ''));
+            this.targets.replaceChildren(new Option(this.volume ? '正在读取目标…' : '请先选择来源分区', ''));
             this.targetList = [];
             this.upgradeAllowed = false;
             message(this.constraint, '');
             this.validate();
             if (!this.volume) {
                 ++this.seq;
-                this.dir = '.';
-                this.path.textContent = '/';
-                this.list.replaceChildren();
+                this.showDirectory('.');
+                this.emptyList('请选择来源分区');
+                this.validate();
                 return;
             }
             const ref = this.volume;
@@ -351,26 +414,30 @@
                 if (this.kind === 'upgrade') {
                     q.set('kind', 'upgrade');
                     await api('media/targets?' + q);
-                    if (this.volume === ref) this.upgradeAllowed = true;
+                    if (this.selection === selection) this.upgradeAllowed = true;
                     this.validate();
                     return;
                 }
                 const targets = await api('media/targets?' + q);
-                if (this.volume !== ref) return;
+                if (this.selection !== selection) return;
                 this.targetList = targets;
+                this.targets.replaceChildren(new Option(targets.length ? '选择写入目标' : '没有可用的写入目标', ''));
                 for (const x of targets) this.targets.add(new Option((x.type || '') + ' ' + x.path + ' · ' + x.size, x.ref.id));
-                if (!targets.length) this.targets.firstChild.textContent = '没有可用的异盘目标';
-            } catch (e) { if (this.volume === ref) message(this.constraint, e.message, true); }
+            } catch (e) {
+                if (this.selection !== selection) return;
+                this.targets.replaceChildren(new Option('读取失败', ''));
+                message(this.constraint, e.message, true);
+            }
             this.validate();
         }
 
         async browse(dir) {
             if (!this.volume) return;
-            this.dir = dir;
-            this.path.textContent = dir === '.' ? '/' : '/' + dir;
+            this.showDirectory(dir);
             const seq = ++this.seq;
             const q = new URLSearchParams({id:this.volume.id, name:this.volume.name, dir});
-            this.list.replaceChildren(tag('span', '正在读取…'));
+            this.emptyList('正在读取目录…');
+            this.validate();
             try {
                 const files = await api('media/files?' + q);
                 if (seq !== this.seq) return;
@@ -380,8 +447,8 @@
                 for (const f of files) {
                     const img = /\.img$/i.test(f.name), meta = /\.json$/i.test(f.name);
                     if (!f.dir && (upgrade ? !(img || meta) : meta)) continue;
-                    const b = button((f.dir ? '📁 ' : '↳ ') + f.name, () => {
-                        const path = dir === '.' ? f.name : dir + '/' + f.name;
+                    const path = dir === '.' ? f.name : dir + '/' + f.name;
+                    const b = button('', () => {
                         if (f.dir) this.browse(path);
                         else if (meta) this.setSelected(this.imagePath, path);
                         else {
@@ -390,12 +457,17 @@
                             this.setSelected(path, companion ? (dir === '.' ? '' : dir+'/')+companion.name : this.metaPath);
                         }
                     }, 'device-file');
+                    b.append(mediaIcon(f.dir ? 'folder' : 'file'), tag('span', f.name),
+                        mediaIcon(f.dir ? 'chevron' : 'check'));
+                    if (!f.dir) b.dataset.file = path;
                     this.list.append(b);
                 }
-                if (!this.list.children.length) this.list.append(tag('span','此目录没有可选镜像或子目录。'));
+                if (!this.list.children.length) this.emptyList('此目录没有可选文件');
+                this.highlight();
+                this.validate();
             } catch (e) {
                 if (seq !== this.seq) return;
-                this.list.replaceChildren();
+                this.emptyList('读取目录失败');
                 message(this.msg, e.message, true);
             }
         }
@@ -407,13 +479,26 @@
         setSelected(image = '', meta = '') {
             this.imagePath = image;
             this.metaPath = meta;
-            this.image.textContent = image || '未选镜像';
-            this.meta.textContent = meta || '未选清单';
+            this.image.textContent = image ? '/' + image : '未选择文件';
+            this.meta.textContent = meta ? '/' + meta : '未选择文件';
+            this.highlight();
             this.validate();
         }
 
+        highlight() {
+            for (const row of this.list.querySelectorAll('[data-file]')) {
+                row.setAttribute('aria-pressed', String(row.dataset.file === this.imagePath || row.dataset.file === this.metaPath));
+            }
+        }
+
         validate() {
-            this.submit.disabled = !!mediaActive || !this.imagePath || !this.volume ||
+            const busy = !!mediaActive || !!this.submitting;
+            this.refresh.disabled = busy || !!this.loadingVolumes;
+            this.vol.disabled = busy || !this.volumes.length;
+            this.up.disabled = busy || this.dir === '.';
+            this.targets.disabled = busy || !this.targetList.length;
+            for (const row of this.list.querySelectorAll('button')) row.disabled = busy;
+            this.submit.disabled = busy || !this.imagePath || !this.volume ||
                 (this.kind === 'upgrade' ? !this.metaPath || !this.upgradeAllowed : !this.targets.value);
         }
 
@@ -425,7 +510,9 @@
             if (!confirm(upgrade
                 ? '从设备存储更新引导和恢复系统？请保持设备供电。'
                 : '确定把 ' + this.imagePath + ' 写到 ' + target.path + '？目标上的数据会被覆盖。')) return;
-            this.submit.disabled = true;
+            this.submitting = true;
+            this.validate();
+            message(this.msg, '');
             const job = {volume:{name:this.volume.name, id:this.volume.id}, image:this.imagePath,
                 manifest:this.metaPath};
             if (target) job.target = target.ref;
@@ -434,6 +521,8 @@
                 await pollMedia();
             } catch (e) {
                 message(this.msg, e.message, true);
+            } finally {
+                this.submitting = false;
                 this.validate();
             }
         }

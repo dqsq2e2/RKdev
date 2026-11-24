@@ -282,8 +282,7 @@ def build_rootfs(args, root, board, cfg, data, stage, modules, kernelrelease, en
     env = os.environ.copy()
     env.update(GOOS="linux", GOARCH="arm64", CGO_ENABLED="0")
     app = rootfs / "usr/bin/rkdev"
-    display = [] if (rootfs / "etc/rkdev-display-enabled").is_file() else ["-tags", "rkdev_nodisplay"]
-    run(["go", "build", *display, "-trimpath", "-buildvcs=false", "-ldflags", f"-s -w -X main.buildTime={args.version}",
+    run(["go", "build", "-trimpath", "-buildvcs=false", "-ldflags", f"-s -w -X main.buildTime={args.version}",
          "-o", app, "."], cwd=CORE / "recovery/app", env=env)
     cp = run(["chroot", rootfs, "apk", "info", "-v"], capture_output=True, text=True)
     return rootfs, sorted(cp.stdout.splitlines())
