@@ -639,7 +639,7 @@
         <div class="nav-tab active" data-panel="flash-panel" onclick="switchTab(this)">⚡ 固件刷写</div>
         <div class="nav-tab" data-panel="boot-panel" onclick="switchTab(this)">🔀 引导顺序</div>
         <div class="nav-tab" data-panel="storage-panel" onclick="switchTab(this)">🔌 硬件检测</div>
-        <div class="nav-tab" data-panel="update-panel" onclick="switchTab(this)">📦 更新助手</div>
+        <div class="nav-tab" data-panel="update-panel" onclick="switchTab(this)">📦 更新RKdev</div>
         <div class="nav-tab" data-panel="backup-panel" onclick="switchTab(this)">💿 备份还原</div>
         <div class="nav-tab" data-panel="firewall-panel" onclick="switchTab(this)">🌐 网络配置</div>
         <div class="nav-tab" data-panel="management-panel" onclick="switchTab(this)">🔑 管理</div>
@@ -1032,31 +1032,40 @@
 
 <div id="update-panel" class="panel">
     <div class="update-card">
-        <h1>更新助手</h1>
+        <h1>更新RKdev</h1>
         <p class="subtitle">升级本板的引导与恢复系统，保留已安装的系统和环境变量。</p>
         <div class="update-version-info">
             <div><span class="v-label">当前版本:</span> <span class="v-value">v{{.BuildTime}}</span></div>
         </div>
         <div class="update-section">
-            <div class="update-section-title">📤 上传更新</div>
-            <div class="update-warning-box">提交同一版本的 IMG 与 JSON 清单。更新期间请保持供电。</div>
-        <form onsubmit="upgradeRecovery(event)">
-            <div class="recovery-fields">
-                <label class="recovery-field update-upload-area" id="recovery-upload-area" for="recovery-image">
-                    <span class="update-upload-icon">📦</span>
-                    <span class="update-upload-text">点击选择文件或拖拽文件到此区域</span>
-                    <input id="recovery-image" type="file" accept=".img" required>
-                    <small>选择解压后的 IMG 文件。</small>
-                </label>
-                <label class="recovery-field">配套 JSON 清单 <input id="recovery-manifest" type="file" accept=".json,application/json" required></label>
+            <div class="update-section-title">📦 本地更新</div>
+            <div class="update-warning-box">选择同一版本的 IMG 与 JSON 清单。更新期间请保持供电。</div>
+            <fieldset id="recovery-sources" class="flash-sources">
+                <legend>更新包来源</legend>
+                <div class="flash-source-options">
+                    <label><input type="radio" name="recovery-source" value="upload" checked aria-controls="recovery-upload-source"><span>从电脑上传</span></label>
+                    <label><input type="radio" name="recovery-source" value="device" aria-controls="recovery-device-source"><span>从设备存储选择</span></label>
+                </div>
+            </fieldset>
+            <div id="recovery-upload-source">
+                <form onsubmit="upgradeRecovery(event)">
+                    <div class="recovery-fields">
+                        <label class="recovery-field update-upload-area" id="recovery-upload-area" for="recovery-image">
+                            <span class="update-upload-icon">📦</span>
+                            <span class="update-upload-text">点击选择文件或拖拽文件到此区域</span>
+                            <input id="recovery-image" type="file" accept=".img" required>
+                            <small>选择解压后的 IMG 文件。</small>
+                        </label>
+                        <label class="recovery-field">配套 JSON 清单 <input id="recovery-manifest" type="file" accept=".json,application/json" required></label>
+                    </div>
+                    <div class="boot-actions"><button class="btn-boot-save" id="recovery-submit" type="submit">上传并升级</button></div>
+                </form>
+                <p id="recovery-result" class="update-status" role="status" aria-live="polite"></p>
             </div>
-            <div class="boot-actions"><button class="btn-boot-save" id="recovery-submit" type="submit">上传并升级</button></div>
-        </form>
-        <details class="device-media" data-media="upgrade">
-            <summary>从设备存储更新</summary>
+        <details id="recovery-device-source" class="device-media" data-media="upgrade" hidden>
+            <summary>选择设备存储中的更新文件</summary>
             <div class="device-media-body"></div>
         </details>
-        <p id="recovery-result" class="update-status" role="status" aria-live="polite"></p>
         </div>
         <div class="update-section" id="online-update" hidden>
             <div class="update-section-title">🌐 在线更新</div>

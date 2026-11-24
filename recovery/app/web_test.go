@@ -109,10 +109,13 @@ func TestWebTemplate(t *testing.T) {
 			t.Fatal(err)
 		}
 		html := output.String()
-		for _, marker := range []string{"Example Board", "vtest", `<link rel="icon" type="image/png" href="/res/boot-mark.png">`, "flash-panel", "boot-panel", "storage-panel", "update-panel", "backup-panel", "firewall-panel", "terminal-panel", "management-panel", ".boot-type-sata .boot-type-badge", "recovery-manifest", "/api/update_check", "/api/update_download", "/api/update_cancel"} {
+		for _, marker := range []string{"Example Board", "vtest", `<link rel="icon" type="image/png" href="/res/boot-mark.png">`, "flash-panel", "boot-panel", "storage-panel", "update-panel", "backup-panel", "firewall-panel", "terminal-panel", "management-panel", ".boot-type-sata .boot-type-badge", "更新RKdev", `name="recovery-source" value="upload"`, `name="recovery-source" value="device"`, `id="recovery-upload-source"`, `id="recovery-device-source"`, "recovery-manifest", "/api/update_check", "/api/update_download", "/api/update_cancel"} {
 			if !strings.Contains(html, marker) {
 				t.Errorf("%s missing %s", profile, marker)
 			}
+		}
+		if strings.Contains(html, "更新助手") {
+			t.Errorf("%s still shows the old update panel title", profile)
 		}
 		if strings.Contains(html, "PHX-R3588") || strings.Contains(html, "iflytek_rk3588_aiui") ||
 			strings.Contains(html, "eMMC 系统空间</strong>") != (profile == "emmc") {

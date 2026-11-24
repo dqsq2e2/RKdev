@@ -817,12 +817,57 @@
     let mediaActive = false, mediaTimer, mediaRevision = 0;
     const flash = new FlashForm();
     const upgrade = new DeviceFiles(document.querySelector('[data-media="upgrade"]'));
+
+    class RecoverySourcePicker {
+        constructor(media) {
+            this.media = media;
+            this.upload = get('recovery-upload-source');
+            this.image = get('recovery-image');
+            this.manifest = get('recovery-manifest');
+            this.result = get('recovery-result');
+            this.radios = [...document.querySelectorAll('input[name="recovery-source"]')];
+            this.source = '';
+            for (const radio of this.radios) radio.addEventListener('change', () => this.set(radio.value, true));
+            this.set(this.radios.find(radio => radio.checked)?.value || 'upload', false);
+        }
+
+        set(source, clearSelection) {
+            const next = source === 'device' ? 'device' : 'upload';
+            const changed = this.source !== next;
+            this.source = next;
+            for (const radio of this.radios) radio.checked = radio.value === next;
+            const usingDevice = next === 'device';
+            this.upload.hidden = usingDevice;
+            this.media.root.hidden = !usingDevice;
+            this.media.root.open = usingDevice;
+            if (usingDevice) this.media.ensureLoaded();
+            if (changed && clearSelection) {
+                this.image.value = '';
+                this.manifest.value = '';
+                this.media.setSelected();
+                this.result.className = 'update-status';
+                this.result.textContent = '';
+            }
+            this.validate();
+        }
+
+        selectDevice() {
+            this.set('device', false);
+        }
+
+        validate() {
+            for (const radio of this.radios) radio.disabled = mediaActive;
+        }
+    }
+
+    const updateSources = new RecoverySourcePicker(upgrade);
     function showMediaJob(j) {
         mediaActive = !!j.id && !['done','error'].includes(j.stage);
         flash.observe(j);
         upgrade.validate();
+        updateSources.validate();
         if (!j.id || j.kind !== 'upgrade') return;
-        if (mediaActive) upgrade.root.open = true;
+        if (mediaActive && updateSources.source !== 'device') updateSources.selectDevice();
         const phase = {preparing:'正在打开源卷与镜像', checking:'正在校验升级镜像',
             writing:'正在直接写入并读回校验', done:'完成', error:'未完成'}[j.stage] || j.stage;
         message(upgrade.progress, j.image + '：' + phase + (j.message ? ' — ' + j.message : ''), j.stage === 'error');
