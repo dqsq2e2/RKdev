@@ -52,6 +52,105 @@
     border: 1px solid #d2873d;
     border-radius: 8px;
 }
+.flash-form {
+    display: grid;
+    gap: 16px;
+    width: min(100%, 620px);
+    margin: 24px auto 0;
+    text-align: start;
+    font-size: 14px;
+}
+.flash-sources { min-width: 0; border: 0; }
+.flash-sources legend,
+.flash-label {
+    display: block;
+    margin-bottom: 6px;
+    color: var(--text-primary);
+    font-weight: 600;
+}
+.flash-source-options {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 3px;
+    padding: 3px;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    background: var(--bg-section);
+}
+.flash-source-options label { position: relative; min-width: 0; }
+.flash-source-options input {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    opacity: 0;
+    cursor: pointer;
+}
+.flash-source-options span {
+    display: grid;
+    place-items: center;
+    min-height: 36px;
+    padding: 4px 8px;
+    border: 1px solid transparent;
+    border-radius: 5px;
+    text-align: center;
+    color: var(--text-secondary);
+}
+.flash-source-options input:enabled:hover + span { color: var(--accent); }
+.flash-source-options input:checked + span {
+    color: var(--accent);
+    background: var(--bg-card);
+    border-color: var(--accent-border);
+    font-weight: 600;
+}
+.flash-source-options input:disabled { cursor: default; }
+.flash-field, .flash-control { min-width: 0; }
+.flash-row {
+    display: flex;
+    align-items: stretch;
+    gap: 8px;
+    min-width: 0;
+}
+.flash-row > :is(output, select) {
+    flex: 1 1 0;
+    min-width: 0;
+    min-height: 40px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+}
+.flash-row output {
+    display: flex;
+    align-items: center;
+    padding: 7px 10px;
+    color: var(--text-secondary);
+    overflow-wrap: anywhere;
+    line-height: 1.4;
+}
+.flash-row select { text-overflow: ellipsis; }
+.flash-row button { flex: none; }
+#flash-choose-file {
+    align-self: start;
+    height: 40px;
+    padding-inline: 12px;
+    border-radius: 6px;
+    white-space: nowrap;
+    cursor: pointer;
+}
+#flash-choose-file:hover:enabled,
+.flash-device-dialog button:not(.primary):hover:enabled {
+    color: var(--accent);
+    border-color: var(--accent-border);
+}
+.flash-form button:disabled { cursor: default; }
+.flash-form :is(button, select):focus-visible,
+.flash-source-options input:focus-visible + span {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+}
+.flash-control .settings-message:not(:empty) { margin-top: 6px; }
+.flash-submit { display: flex; justify-content: end; }
+#btn-flash { min-width: 124px; min-height: 40px; border-radius: 6px; font-weight: 600; }
+
 .device-media {
     margin: 18px 0 0;
     border-block: 1px solid var(--border);
@@ -84,7 +183,7 @@
 .device-media[open] summary::after { transform: translateY(-2px) rotate(45deg); }
 .device-media summary:hover { color: var(--accent); }
 .device-media-body { display: grid; gap: 12px; padding: 2px 0 14px; }
-.device-media .settings-message:empty { display: none; }
+:is(.device-media, .flash-form) .settings-message:empty { display: none; }
 .device-source,
 .device-actions {
     display: flex;
@@ -100,7 +199,7 @@
     background: var(--bg-input);
     text-overflow: ellipsis;
 }
-.device-media button.device-media-tool {
+:is(.device-media, .flash-form) button.device-media-tool {
     display: grid;
     place-items: center;
     flex: none;
@@ -112,13 +211,15 @@
     color: var(--text-secondary);
     background: var(--bg-input);
 }
-.device-media button.device-media-tool:hover:enabled {
+:is(.device-media, .flash-form) button.device-media-tool:hover:enabled {
     color: var(--accent);
     border-color: var(--accent);
 }
 .device-media button:disabled { cursor: default; }
-.device-media button.device-media-tool:disabled { opacity: .45; cursor: default; }
-.device-media svg { display: block; width: 17px; height: 17px; }
+:is(.device-media, .flash-form) button.device-media-tool:disabled { opacity: .45; cursor: default; }
+:is(.device-media, .flash-form) .device-media-tool svg,
+.device-file svg { display: block; width: 17px; height: 17px; }
+#flash-refresh-targets { align-self: start; width: 40px; height: 40px; }
 .device-browser {
     min-width: 0;
     overflow: hidden;
@@ -190,7 +291,21 @@
     cursor: pointer;
 }
 .device-media .device-actions .btn-boot-save:disabled { cursor: default; }
+.flash-device-dialog {
+    width: min(540px, calc(100% - 24px));
+    max-height: calc(100% - 24px);
+    margin: auto;
+    padding: 18px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-card);
+    color: var(--text-primary);
+}
+.flash-device-dialog::backdrop { background: rgba(0, 0, 0, .46); }
+.flash-device-dialog h2 { margin-bottom: 12px; font-size: 17px; }
+.flash-device-dialog .device-actions button { min-height: 36px; border-radius: 6px; }
 @media (max-width: 540px) {
+    #btn-flash { width: 100%; }
     .device-actions { flex-wrap: wrap; }
     .device-actions .setting-field { flex: 1 0 100%; }
 }

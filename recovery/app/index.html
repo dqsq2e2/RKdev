@@ -118,7 +118,6 @@
         button.primary { background: var(--accent); color: #fff; border: none; cursor: pointer; }
         button.primary:disabled { background: #999; cursor: not-allowed; }
         button.refresh-btn { background: var(--bg-info); color: var(--accent); border: 1px solid var(--accent-border); cursor: pointer; }
-        #device-select { min-width: min(350px, 100%); max-width: 100%; font-family: monospace; font-size: 13px; }
 
         .progress-container { margin-top: 25px; display: none; text-align: left; }
         .progress-bar-outer { width: 100%; height: 30px; background: var(--bar-bg); border-radius: 15px; overflow: hidden; position: relative; }
@@ -652,23 +651,49 @@
                 <h1>{{if .BoardName}}{{.BoardName}}{{else}}RKdev{{end}} 恢复助手 <span class="ver-tag">v{{.BuildTime}}</span></h1>
                 <p id="board-profile" class="subtitle">{{.Profile}}</p>
                 <p id="layout-status" class="update-status" role="status"></p>
-                <p class="subtitle">选择目标存储设备，上传固件文件即可一键刷写</p>
-                <p class="format-desc">支持 <span class="fmt">.img / .bin</span> 单文件固件，支持常见压缩文件，支持多分区打包固件<span class="fmt-note">（自动解压并解析分区表）</span>。</p>
 
-                <div class="form-group">
-                    <label for="device-select"><strong>目标设备:</strong></label>
-                    <select id="device-select"><option value="">-- 请点击刷新加载设备 --</option></select>
-                    <button type="button" class="refresh-btn" onclick="loadDevices()">🔄 刷新</button>
-                </div>
-
-                <form id="upload-form" class="form-group" onsubmit="handleUpload(event)">
-                    <input type="file" name="firmware" id="firmware-file" accept=".img,.bin,.gz,.rar,.bz2,.zip,.7z,.tar,.tgz,.tbz,.tbz2" required>
-                    <button type="submit" class="primary" id="btn-flash">⚡ 开始刷写</button>
+                <form id="flash-form" class="flash-form">
+                    <fieldset id="flash-sources" class="flash-sources">
+                        <legend>镜像来源</legend>
+                        <div class="flash-source-options">
+                            <label><input type="radio" name="flash-source" value="upload" checked><span>从电脑上传</span></label>
+                            <label><input type="radio" name="flash-source" value="device"><span>从设备存储选择</span></label>
+                        </div>
+                    </fieldset>
+                    <div class="flash-field" role="group" aria-labelledby="flash-file-label">
+                        <span class="flash-label" id="flash-file-label">镜像文件</span>
+                        <div class="flash-control">
+                            <div class="flash-row">
+                                <output id="flash-file-name" for="firmware-file">未选择镜像</output>
+                                <button type="button" id="flash-choose-file" aria-describedby="flash-file-name">选择镜像</button>
+                                <input type="file" id="firmware-file" accept=".img,.bin,.gz,.rar,.bz2,.zip,.7z,.tar,.tgz,.tbz,.tbz2" hidden>
+                            </div>
+                            <p id="flash-file-status" class="settings-message" role="status"></p>
+                        </div>
+                    </div>
+                    <div class="flash-field">
+                        <label class="flash-label" for="device-select">写入目标</label>
+                        <div class="flash-control">
+                            <div class="flash-row">
+                                <select id="device-select" aria-describedby="flash-target-status" disabled><option value="">请先选择镜像</option></select>
+                                <button type="button" id="flash-refresh-targets" class="device-media-tool" aria-label="刷新写入目标" title="刷新写入目标" disabled></button>
+                            </div>
+                            <p id="flash-target-status" class="settings-message" role="status"></p>
+                        </div>
+                    </div>
+                    <div class="flash-submit">
+                        <button type="submit" class="primary" id="btn-flash" disabled>开始刷写</button>
+                    </div>
                 </form>
-                <details class="device-media" data-media="flash">
-                    <summary>从设备存储选择镜像</summary>
+
+                <dialog id="flash-device-dialog" class="device-media flash-device-dialog" aria-labelledby="flash-device-title">
+                    <h2 id="flash-device-title">选择设备中的镜像</h2>
                     <div class="device-media-body"></div>
-                </details>
+                    <div class="device-actions">
+                        <button type="button" id="flash-cancel-file">取消</button>
+                        <button type="button" id="flash-use-file" class="primary" disabled>选用镜像</button>
+                    </div>
+                </dialog>
 
                 <div class="progress-container" id="progress-container">
                     <div style="margin-bottom:8px;font-weight:bold;">刷写进度 <span class="status-badge" id="status-badge"></span></div>
@@ -683,7 +708,7 @@
                     </div>
                 </div>
 
-                <div id="result-area"></div>
+                <div id="result-area" role="status"></div>
 
                 <div class="warning-box">
                     <h3>⚠️ 高危操作注意</h3>
@@ -691,7 +716,7 @@
                         {{if eq .Profile "emmc"}}<li><strong>eMMC 系统空间</strong>：选择板载 eMMC 时只替换系统空间，保留引导和恢复系统。</li>{{end}}
                         <li><strong>文件类型</strong>：支持 .img / .bin 单文件固件，支持常见压缩文件，支持多分区固件。</li>
                         <li><strong>数据丢失风险</strong>：所选目标上的系统或数据将被覆盖。</li>
-                        <li><strong>连接与供电</strong>：大镜像会在传输中覆盖目标系统，完成前请勿断网、断电。</li>
+                        <li><strong>连接与供电</strong>：完成前请勿断电或拔出存储介质；从电脑上传时请保持网络连接。</li>
                     </ul>
                 </div>
                 <div class="adv-toggle">
@@ -1556,58 +1581,10 @@
     }
 
     // ==================== Flash Functions ====================
-    let eventSource = null;
-
     // 固件文件名预检，与上传后端支持的格式保持一致。
     function fwNameOk(name) {
         return /\.(img|bin)(\.(gz|bz2))$/i.test(name || '') ||
             /\.(img|bin|rar|zip|7z|tar|tgz|tbz|tbz2|tar\.gz|tar\.bz2)$/i.test(name || '');
-    }
-
-    document.getElementById('firmware-file').addEventListener('change', function () {
-        if (!this.files.length) return;
-        const name = this.files[0].name;
-        if (!fwNameOk(name)) {
-            showResult(`⚠️ 不支持的文件类型: ${name}`, "error");
-            appendLog('不支持的文件类型: ' + name, 'error');
-            this.value = '';
-            return;
-        }
-        showResult(/\.gz$/i.test(name) ? `已选择 ${name}，上传时将自动解压` : `已选择 ${name}`, "info");
-        appendLog('已选择固件文件: ' + name, 'info');
-    });
-
-    async function loadDevices() {
-        const sel = document.getElementById('device-select');
-        sel.innerHTML = '<option value="">加载中...</option>';
-        try {
-            const resp = await fetch('/api/devices');
-            if (!resp.ok) throw new Error("HTTP " + resp.status);
-            const devices = await resp.json();
-            sel.innerHTML = '<option value="">-- 请选择目标设备 --</option>';
-            if (!devices?.length) {
-                const o = document.createElement('option');
-                o.text = "未发现符合条件的设备";
-                o.disabled = true;
-                o.selected = true;
-                sel.add(o);
-                showResult("未扫描到可用设备，请插入 U 盘或 NVMe 硬盘后点击刷新", "error");
-                appendLog('未扫描到可用设备', 'error');
-                return;
-            }
-            devices.forEach(d => {
-                const o = document.createElement('option');
-                o.value = d.path;
-                o.text = `${d.type ? '['+d.type+']' : ''} ${d.path} ${d.size ? '('+d.size+')' : ''} ${d.model ? '- '+d.model : ''}`;
-                sel.add(o);
-            });
-            showResult(`已加载 ${devices.length} 个设备`, "success");
-            appendLog('设备列表已加载，共 ' + devices.length + ' 个设备', 'success');
-        } catch (e) {
-            sel.innerHTML = '<option value="">加载失败</option>';
-            showResult("加载失败: " + e.message, "error");
-            appendLog('设备加载失败: ' + e.message, 'error');
-        }
     }
 
     // ==================== Upload Progress Polling ====================
@@ -1653,74 +1630,16 @@
         if (uploadPollTimer) { clearInterval(uploadPollTimer); uploadPollTimer = null; }
     }
 
-    async function handleUpload(e) {
-        e.preventDefault();
-        const dev = document.getElementById('device-select');
-        const file = document.getElementById('firmware-file');
-        if (!dev.value) { showResult("请先选择目标设备！", "error"); appendLog("请先选择目标设备", "error"); return; }
-        if (!file.files.length) { showResult("请先选择固件文件！", "error"); appendLog("请先选择固件文件", "error"); return; }
-        if (!fwNameOk(file.files[0].name)) {
-            showResult(`⚠️ 不支持的文件类型: ${file.files[0].name}`, "error");
-            appendLog('不支持的文件类型: ' + file.files[0].name, 'error');
-            return;
-        }
-
-        const mb = (file.files[0].size / 1048576).toFixed(1);
-        if (!confirm(`⚠️ 确定要将 ${mb} MB 刷写到 ${dev.value}？\n目标系统数据将被覆盖；写入期间请勿断网、断电。`)) return;
-        appendLog('用户确认刷写: ' + file.files[0].name + ' (' + mb + ' MB) → ' + dev.value, 'warn');
-
-        const fd = new FormData();
-        fd.append('target_device', dev.value);
-        fd.append('firmware_size', String(file.files[0].size));
-        fd.append('firmware', file.files[0]);
-
-        const btn = document.getElementById('btn-flash');
-        btn.disabled = true; btn.textContent = "⏳ 执行中...";
-        showResult("正在接收固件 ...", "info");
-        appendLog('开始上传固件: ' + file.files[0].name + ' → ' + dev.value, 'info');
-        hideProgress();
-        startUploadPoll();
-
-        try {
-            const resp = await fetch('/upload', { method: 'POST', body: fd });
-            stopUploadPoll();   // 服务端已处理完，先停轮询再显示结果
-            const text = await resp.text();
-            let result;
-            try { result = JSON.parse(text); } catch { showResult(`非JSON响应: ${text.substring(0,300)}`, "error"); appendLog('非JSON响应: ' + text.substring(0,300), 'error'); resetBtn(); return; }
-            if (!resp.ok) { showResult("❌ " + (result.error || "未知错误"), "error"); appendLog("上传失败: " + (result.error || "未知错误"), "error"); resetBtn(); return; }
-            showResult("✅ " + result.message, "info");
-            appendLog('上传完成: ' + result.message + ' (task_id=' + result.task_id + ')', 'success');
-            startProgress(result.task_id);
-        } catch (err) {
-            stopUploadPoll();
-            showResult("网络错误: " + err.message, "error"); appendLog("网络错误: " + err.message, "error"); resetBtn();
-        }
-    }
-
-    function startProgress(taskId) {
-        if (eventSource) eventSource.close();
-        showProgress();
-        eventSource = new EventSource(`/api/progress?id=${taskId}`);
-        eventSource.onmessage = (e) => {
-            try {
-                const t = JSON.parse(e.data);
-                updateProgressUI(t);
-                if (t.status === "done") { eventSource.close(); eventSource = null; showResult("✅ 刷写完成！", "success"); appendLog("刷写完成！", "success"); resetBtn(); }
-                else if (t.status === "error") { eventSource.close(); eventSource = null; showResult("❌ " + (t.error||"未知错误"), "error"); appendLog("刷写失败: " + (t.error||"未知错误"), "error"); resetBtn(); }
-            } catch {}
-        };
-        eventSource.onerror = () => { if (eventSource) { eventSource.close(); eventSource = null; } };
-    }
-
     let lastStatus = '';
     let lastProgressLogTime = 0;
     function updateProgressUI(t) {
-        const pct = Math.min(t.progress, 100).toFixed(1);
+        const pct = Math.min(t.progress || 0, 100).toFixed(1);
         document.getElementById('progress-bar').style.width = pct + '%';
         document.getElementById('progress-percent').textContent = pct + '%';
         document.getElementById('progress-written').textContent = '已写入: ' + fmtBytes(t.written);
         document.getElementById('progress-total').textContent = '总大小: ' + fmtBytes(t.total);
-        document.getElementById('progress-speed').textContent = '速度: ' + (t.speed / 1048576).toFixed(1) + ' MB/s';
+        const speed = ((t.speed || 0) / 1048576).toFixed(1) + ' MB/s';
+        document.getElementById('progress-speed').textContent = '速度: ' + speed;
         const badge = document.getElementById('status-badge');
         const map = { writing: ['写入中','status-writing'], partitioning: ['更新分区表','status-syncing'], syncing: ['同步中','status-syncing'], verifying: ['读回校验','status-syncing'], done: ['完成','status-done'], error: ['错误','status-error'] };
         const [txt, cls] = map[t.status] || ['',''];
@@ -1729,7 +1648,7 @@
         if (t.status !== lastStatus || t.status === 'done' || t.status === 'error' || now - lastProgressLogTime >= 3000) {
             lastProgressLogTime = now;
             if (t.status !== lastStatus) lastStatus = t.status;
-            appendLog('进度: ' + pct + '% | 已写入: ' + fmtBytes(t.written) + ' / ' + fmtBytes(t.total) + ' | 速度: ' + (t.speed / 1048576).toFixed(1) + ' MB/s | 状态: ' + txt, t.status === 'error' ? 'error' : t.status === 'done' ? 'success' : 'data');
+            appendLog('进度: ' + pct + '% | 已写入: ' + fmtBytes(t.written) + ' / ' + fmtBytes(t.total) + ' | 速度: ' + speed + ' | 状态: ' + txt, t.status === 'error' ? 'error' : t.status === 'done' ? 'success' : 'data');
         }
     }
 
@@ -3058,7 +2977,6 @@
     // ==================== Utilities ====================
     function showProgress() { document.getElementById('progress-container').style.display = 'block'; }
     function hideProgress() { document.getElementById('progress-container').style.display = 'none'; }
-    function resetBtn() { const b = document.getElementById('btn-flash'); b.disabled = false; b.textContent = "⚡ 开始刷写"; }
     function showResult(msg, type) { const a = document.getElementById('result-area'); a.style.display = 'block'; a.className = type; a.textContent = msg; }
     function fmtBytes(b) {
         if (!b) return '0 B';
@@ -3072,8 +2990,6 @@
         advCheck.checked = false;
         document.getElementById('flash-panel').classList.remove('advanced');
         document.getElementById('log-panel').classList.remove('visible');
-        document.getElementById('firmware-file').value = '';
-        loadDevices();
         renderFwDownloads();
     };
 </script>

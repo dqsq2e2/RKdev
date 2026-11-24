@@ -18,7 +18,7 @@
             method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body)
         });
         const data = await r.json();
-        if (!r.ok || data.error) throw new Error(data.error || '请求失败 (' + r.status + ')');
+        if (!r.ok || data?.error) throw new Error(data?.error || '请求失败 (' + r.status + ')');
         return data;
     }
     function field(label, control) {
@@ -298,24 +298,16 @@
     }
 
     class DeviceFiles {
-        constructor(details) {
-            this.details = details;
-            this.kind = details.dataset.media;
-            const upgrade = this.kind === 'upgrade';
-            this.body = details.querySelector('.device-media-body');
+        constructor(root, onChange = () => {}) {
+            this.root = root;
+            this.onChange = onChange;
+            this.upgrade = root.dataset.media === 'upgrade';
+            const body = root.querySelector('.device-media-body');
             this.msg = status();
-            this.progress = status();
-            this.constraint = status();
             this.vol = select([], '', () => this.selectVolume());
             this.vol.setAttribute('aria-label', '来源分区');
             this.list = tag('div', '', 'device-file-list');
             this.path = tag('span', '/', 'device-directory-path');
-            this.targets = select([['','请先选择来源分区']], '');
-            this.targets.setAttribute('aria-label', '写入目标');
-            this.image = tag('dd', '未选择文件');
-            this.meta = tag('dd', '未选择文件');
-            this.submit = button(upgrade ? '升级恢复系统' : '开始刷写', () => this.start(), 'btn-boot-save');
-            this.submit.disabled = true;
             this.refresh = mediaTool('refresh', '刷新存储', () => this.load());
             this.up = mediaTool('parent', '上一级', () => this.parent());
             const source = tag('div', '', 'device-source');
@@ -324,24 +316,30 @@
             path.append(this.up, this.path);
             const files = tag('div', '', 'device-browser');
             files.append(path, this.list);
-            const selections = tag('dl', '', 'device-choices');
-            selections.append(tag('dt', '镜像'), this.image);
-            if (upgrade) selections.append(tag('dt', '校验清单'), this.meta);
-            const actions = tag('div', '', 'device-actions');
-            if (!upgrade) {
-                actions.append(field('写入目标', this.targets));
-                this.targets.addEventListener('change', () => this.validate());
+            body.append(source, files, this.msg);
+            if (this.upgrade) {
+                this.progress = status();
+                this.constraint = status();
+                this.image = tag('dd', '未选择文件');
+                this.meta = tag('dd', '未选择文件');
+                const selections = tag('dl', '', 'device-choices');
+                selections.append(tag('dt', '镜像'), this.image, tag('dt', '校验清单'), this.meta);
+                const actions = tag('div', '', 'device-actions');
+                this.submit = button('升级恢复系统', () => this.startUpgrade(), 'btn-boot-save');
+                actions.append(this.submit);
+                body.append(selections, actions, this.constraint, this.progress);
+                root.addEventListener('toggle', () => { if (root.open) this.ensureLoaded(); });
             }
-            actions.append(this.submit);
-            this.body.append(source, files, selections, actions, this.msg, this.constraint, this.progress);
             this.volumes = [];
-            this.targetList = [];
             this.dir = '.';
             this.seq = 0;
             this.selection = 0;
             this.emptyList('请选择来源分区');
             this.validate();
-            details.addEventListener('toggle', () => { if (details.open && !this.loaded) this.load(); });
+        }
+
+        ensureLoaded() {
+            if (!this.loaded && !this.loadingVolumes) this.load();
         }
 
         emptyList(text) {
@@ -360,14 +358,12 @@
             this.loadingVolumes = true;
             this.volume = null;
             this.volumes = [];
-            this.targetList = [];
             this.upgradeAllowed = false;
-            message(this.constraint, '');
+            if (this.upgrade) message(this.constraint, '');
             message(this.msg, '');
             this.setSelected();
             this.vol.replaceChildren(new Option('正在读取…', ''));
             this.emptyList('正在读取存储设备…');
-            this.targets.replaceChildren(new Option('请先选择来源分区', ''));
             this.showDirectory('.');
             this.validate();
             try {
@@ -394,12 +390,9 @@
         async selectVolume() {
             const selection = ++this.selection;
             this.volume = this.volumes.find(v => v.id === this.vol.value);
-            this.setSelected();
-            this.targets.replaceChildren(new Option(this.volume ? '正在读取目标…' : '请先选择来源分区', ''));
-            this.targetList = [];
             this.upgradeAllowed = false;
-            message(this.constraint, '');
-            this.validate();
+            if (this.upgrade) message(this.constraint, '');
+            this.setSelected();
             if (!this.volume) {
                 ++this.seq;
                 this.showDirectory('.');
@@ -409,23 +402,14 @@
             }
             const ref = this.volume;
             this.browse('.');
+            if (!this.upgrade) return;
             try {
-                const q = new URLSearchParams({id:ref.id, name:ref.name});
-                if (this.kind === 'upgrade') {
-                    q.set('kind', 'upgrade');
-                    await api('media/targets?' + q);
-                    if (this.selection === selection) this.upgradeAllowed = true;
-                    this.validate();
-                    return;
-                }
-                const targets = await api('media/targets?' + q);
+                const q = new URLSearchParams({id:ref.id, name:ref.name, kind:'upgrade'});
+                await api('media/targets?' + q);
                 if (this.selection !== selection) return;
-                this.targetList = targets;
-                this.targets.replaceChildren(new Option(targets.length ? '选择写入目标' : '没有可用的写入目标', ''));
-                for (const x of targets) this.targets.add(new Option((x.type || '') + ' ' + x.path + ' · ' + x.size, x.ref.id));
+                this.upgradeAllowed = true;
             } catch (e) {
                 if (this.selection !== selection) return;
-                this.targets.replaceChildren(new Option('读取失败', ''));
                 message(this.constraint, e.message, true);
             }
             this.validate();
@@ -443,7 +427,7 @@
                 if (seq !== this.seq) return;
                 this.list.replaceChildren();
                 message(this.msg, '');
-                const upgrade = this.kind === 'upgrade';
+                const upgrade = this.upgrade;
                 for (const f of files) {
                     const img = /\.img$/i.test(f.name), meta = /\.json$/i.test(f.name);
                     if (!f.dir && (upgrade ? !(img || meta) : meta)) continue;
@@ -479,8 +463,10 @@
         setSelected(image = '', meta = '') {
             this.imagePath = image;
             this.metaPath = meta;
-            this.image.textContent = image ? '/' + image : '未选择文件';
-            this.meta.textContent = meta ? '/' + meta : '未选择文件';
+            if (this.upgrade) {
+                this.image.textContent = image ? '/' + image : '未选择文件';
+                this.meta.textContent = meta ? '/' + meta : '未选择文件';
+            }
             this.highlight();
             this.validate();
         }
@@ -491,34 +477,30 @@
             }
         }
 
+        selectedImage() {
+            if (!this.volume || !this.imagePath) return null;
+            const {name, id} = this.volume;
+            return {volume:{name, id}, image:this.imagePath};
+        }
+
         validate() {
             const busy = !!mediaActive || !!this.submitting;
             this.refresh.disabled = busy || !!this.loadingVolumes;
             this.vol.disabled = busy || !this.volumes.length;
             this.up.disabled = busy || this.dir === '.';
-            this.targets.disabled = busy || !this.targetList.length;
             for (const row of this.list.querySelectorAll('button')) row.disabled = busy;
-            this.submit.disabled = busy || !this.imagePath || !this.volume ||
-                (this.kind === 'upgrade' ? !this.metaPath || !this.upgradeAllowed : !this.targets.value);
+            if (this.upgrade) this.submit.disabled = busy || !this.selectedImage() || !this.metaPath || !this.upgradeAllowed;
+            this.onChange(busy ? null : this.selectedImage());
         }
 
-        async start() {
+        async startUpgrade() {
             if (this.submit.disabled) return;
-            const upgrade = this.kind === 'upgrade';
-            const target = upgrade ? null : this.targetList.find(x => x.ref.id === this.targets.value);
-            if (!upgrade && !target) return;
-            if (!confirm(upgrade
-                ? '从设备存储更新引导和恢复系统？请保持设备供电。'
-                : '确定把 ' + this.imagePath + ' 写到 ' + target.path + '？目标上的数据会被覆盖。')) return;
+            if (!confirm('从设备存储更新引导和恢复系统？请保持设备供电。')) return;
             this.submitting = true;
             this.validate();
             message(this.msg, '');
-            const job = {volume:{name:this.volume.name, id:this.volume.id}, image:this.imagePath,
-                manifest:this.metaPath};
-            if (target) job.target = target.ref;
             try {
-                await api('media/' + this.kind, job);
-                await pollMedia();
+                acceptMediaJob(await api('media/upgrade', {...this.selectedImage(), manifest:this.metaPath}));
             } catch (e) {
                 message(this.msg, e.message, true);
             } finally {
@@ -528,33 +510,264 @@
         }
     }
 
-    let mediaActive = false, mediaTimer;
-    const media = Array.from(document.querySelectorAll('details[data-media]'), el => new DeviceFiles(el));
-    async function pollMedia() {
-        clearTimeout(mediaTimer);
-        try {
-            const j = await api('media/job');
-            mediaActive = !!j.id && !['done','error'].includes(j.stage);
-            for (const ui of media) {
-                ui.validate();
-                if (!j.id || ui.kind !== j.kind) continue;
-                if (mediaActive) ui.details.open = true;
-                const phase = {preparing:'正在打开源卷与镜像', checking:'正在校验升级镜像',
-                    writing:'正在直接写入并读回校验', done:'完成', error:'未完成'}[j.stage] || j.stage;
-                let progress = '';
-                if (j.task_id && mediaActive) {
-                    const info = await api('upload_status');
-                    if (info.task_id === j.task_id && info.written > 0) {
-                        progress = ' · 已写入 ' + fmtBytes(info.written) + (info.expanded_total > 0 ?
-                            ' / ' + fmtBytes(info.expanded_total) : '');
+    class FlashForm {
+        constructor() {
+            this.form = get('flash-form');
+            this.sources = get('flash-sources');
+            this.input = get('firmware-file');
+            this.choose = get('flash-choose-file');
+            this.target = get('device-select');
+            this.refresh = get('flash-refresh-targets');
+            this.submit = get('btn-flash');
+            this.dialog = get('flash-device-dialog');
+            this.use = get('flash-use-file');
+            this.picker = new DeviceFiles(this.dialog, selection => { this.use.disabled = !selection; });
+            this.targets = new Map();
+            this.targetRequest = 0;
+            this.refresh.append(mediaIcon('refresh'));
+            this.sources.addEventListener('change', () => {
+                this.input.value = '';
+                this.picker.setSelected();
+                this.setFile(null);
+            });
+            this.choose.addEventListener('click', () => {
+                if (this.form.elements['flash-source'].value === 'upload') this.input.click();
+                else {
+                    this.dialog.showModal();
+                    this.picker.ensureLoaded();
+                }
+            });
+            this.input.addEventListener('change', () => {
+                const file = this.input.files[0];
+                if (file && !fwNameOk(file.name)) {
+                    this.input.value = '';
+                    this.setFile(null);
+                    message(get('flash-file-status'), '不支持的文件类型：' + file.name, true);
+                } else {
+                    this.setFile(file ? {file, label:file.name + ' · ' + fmtBytes(file.size)} : null);
+                }
+            });
+            get('flash-cancel-file').addEventListener('click', () => this.dialog.close());
+            this.use.addEventListener('click', () => {
+                const selection = this.picker.selectedImage();
+                if (!selection) return;
+                this.dialog.close();
+                this.setFile({...selection, label:'/dev/' + selection.volume.name + ':/' + selection.image});
+            });
+            // A cancelled dialog must not replace the file shown on the form.
+            this.dialog.addEventListener('close', () => {
+                const sameVolume = this.file?.volume?.id === this.picker.volume?.id;
+                this.picker.setSelected(sameVolume ? this.file?.image : '');
+            });
+            this.refresh.addEventListener('click', () => this.loadTargets(this.target.value));
+            this.target.addEventListener('change', () => this.validate());
+            this.form.addEventListener('submit', e => {
+                e.preventDefault();
+                this.start();
+            });
+            this.validate();
+        }
+
+        setFile(file) {
+            const sameSource = file && this.file && file.volume?.id === this.file.volume?.id;
+            const keep = sameSource ? this.target.value : '';
+            this.file = file;
+            get('flash-file-name').textContent = file?.label || '未选择镜像';
+            message(get('flash-file-status'), '');
+            this.clearFeedback();
+            this.loadTargets(keep);
+        }
+
+        async loadTargets(keep = '') {
+            const request = ++this.targetRequest;
+            const source = this.file?.volume;
+            const status = get('flash-target-status');
+            this.targets.clear();
+            this.target.replaceChildren(new Option(this.file ? '正在读取…' : '请先选择镜像', ''));
+            message(status, '');
+            this.loadingTargets = !!this.file;
+            this.validate();
+            if (!this.file) return;
+            try {
+                const devices = await api(source ? 'media/targets?' + new URLSearchParams(source) : 'devices');
+                if (request !== this.targetRequest) return;
+                this.target.replaceChildren(new Option(devices?.length ? '请选择写入目标' : '没有可用的写入目标', ''));
+                for (const d of devices || []) {
+                    const key = d.ref?.id || d.path;
+                    this.targets.set(key, d);
+                    this.target.add(new Option([d.type, d.path, d.size, d.model].filter(Boolean).join(' · '), key));
+                }
+                if (this.targets.has(keep)) this.target.value = keep;
+                if (!this.targets.size && source) message(status, '镜像所在的整块盘已排除。');
+            } catch (e) {
+                if (request !== this.targetRequest) return;
+                this.target.replaceChildren(new Option('读取失败', ''));
+                message(status, e.message, true);
+            } finally {
+                if (request === this.targetRequest) {
+                    this.loadingTargets = false;
+                    this.validate();
+                }
+            }
+        }
+
+        validate() {
+            const running = this.sending || this.uploadTask || this.mediaJob;
+            const busy = running || mediaActive;
+            this.sources.disabled = this.choose.disabled = !!busy;
+            this.target.disabled = busy || !this.targets.size;
+            this.refresh.disabled = busy || !this.file || this.loadingTargets;
+            this.submit.disabled = busy || !this.file || !this.targets.has(this.target.value);
+            this.submit.textContent = running ? '执行中…' : '开始刷写';
+        }
+
+        async start() {
+            if (this.submit.disabled) return;
+            const selection = this.file;
+            const target = this.targets.get(this.target.value);
+            if (!confirm('镜像：' + selection.label + '\n写入目标：' + target.path +
+                '\n\n目标上的数据会被覆盖。确定开始刷写？')) return;
+            this.clearFeedback();
+            this.sending = true;
+            this.validate();
+            appendLog('开始刷写: ' + selection.label + ' → ' + target.path, 'warn');
+            try {
+                if (selection.file) await this.upload(selection.file, target.path);
+                else {
+                    showResult('正在打开设备镜像…', 'info');
+                    acceptMediaJob(await api('media/flash', {volume:selection.volume, image:selection.image, target:target.ref}));
+                }
+            } catch (e) {
+                this.finish(e.message);
+            } finally {
+                this.sending = false;
+                this.validate();
+            }
+        }
+
+        async upload(file, target) {
+            const body = new FormData();
+            body.append('target_device', target);
+            body.append('firmware_size', String(file.size));
+            body.append('firmware', file);
+            showResult('正在接收固件…', 'info');
+            startUploadPoll();
+            try {
+                const resp = await fetch('/upload', {method:'POST', body});
+                const data = await resp.json().catch(() => {
+                    throw new Error('未收到刷写响应（HTTP ' + resp.status + '）');
+                });
+                if (!resp.ok || !data.task_id) throw new Error(data.error || '未取得刷写任务');
+                this.uploadTask = data.task_id;
+                showResult(data.message || '正在写入镜像…', 'info');
+                this.watchTask(data.task_id, t => {
+                    this.uploadTask = null;
+                    this.finish(t.status === 'error' ? t.error || '未知错误' : '');
+                    this.validate();
+                });
+            } finally {
+                stopUploadPoll();
+            }
+        }
+
+        clearFeedback() {
+            this.stream?.close();
+            this.task = '';
+            hideProgress();
+            get('result-area').style.display = 'none';
+        }
+
+        watchTask(id, onFinish) {
+            if (this.task === id) return;
+            this.stream?.close();
+            this.task = id;
+            const stream = this.stream = new EventSource('/api/progress?id=' + encodeURIComponent(id));
+            stream.onmessage = e => {
+                let t;
+                try { t = JSON.parse(e.data); } catch { return; }
+                updateProgressUI(t);
+                showProgress();
+                if (t.status === 'done' || t.status === 'error') {
+                    stream.close();
+                    onFinish?.(t);
+                }
+            };
+            // EventSource reconnects on temporary connection failures.
+            stream.onerror = () => {
+                if (stream.readyState === EventSource.CLOSED)
+                    onFinish?.({status:'error', error:'进度连接中断，请确认设备上的任务状态。'});
+            };
+        }
+
+        finish(error, success = '刷写完成！') {
+            const result = error ? '刷写失败：' + error : success;
+            showResult(result, error ? 'error' : 'success');
+            appendLog(result, error ? 'error' : 'success');
+        }
+
+        observe(j) {
+            if (this.mediaJob && this.mediaJob !== j.id) {
+                this.mediaJob = null;
+                this.finish('无法确认设备上的任务结果。');
+            }
+            if (j?.kind === 'flash' && !this.uploadTask && !(this.sending && this.file?.file)) {
+                if (mediaActive && this.mediaJob !== j.id) {
+                    this.clearFeedback();
+                    this.mediaJob = j.id;
+                    this.mediaStage = '';
+                    if (this.dialog.open) this.dialog.close();
+                }
+                if (this.mediaJob && this.mediaJob === j.id) {
+                    if (j.task_id) this.watchTask(j.task_id);
+                    if (!mediaActive) {
+                        this.mediaJob = null;
+                        this.finish(j.stage === 'error' ? j.message || '未知错误' : '', j.message || '刷写完成！');
+                    } else if (this.mediaStage !== j.stage) {
+                        showResult(j.stage === 'writing' ? '正在写入和校验镜像…' : '正在打开设备镜像…', 'info');
+                        this.mediaStage = j.stage;
                     }
                 }
-                message(ui.progress, j.image + '：' + phase + progress + (j.message ? ' — ' + j.message : ''), j.stage === 'error');
             }
-        } catch (e) {
-            if (mediaActive) for (const ui of media) message(ui.progress, '暂时无法读取进度，任务仍由设备执行。', true);
+            this.picker.validate();
+            this.validate();
         }
+    }
+
+    let mediaActive = false, mediaTimer, mediaRevision = 0;
+    const flash = new FlashForm();
+    const upgrade = new DeviceFiles(document.querySelector('[data-media="upgrade"]'));
+    function showMediaJob(j) {
+        mediaActive = !!j.id && !['done','error'].includes(j.stage);
+        flash.observe(j);
+        upgrade.validate();
+        if (!j.id || j.kind !== 'upgrade') return;
+        if (mediaActive) upgrade.root.open = true;
+        const phase = {preparing:'正在打开源卷与镜像', checking:'正在校验升级镜像',
+            writing:'正在直接写入并读回校验', done:'完成', error:'未完成'}[j.stage] || j.stage;
+        message(upgrade.progress, j.image + '：' + phase + (j.message ? ' — ' + j.message : ''), j.stage === 'error');
+    }
+
+    function scheduleMediaPoll() {
+        clearTimeout(mediaTimer);
         mediaTimer = setTimeout(pollMedia, mediaActive ? 1000 : 4500);
+    }
+
+    function acceptMediaJob(j) {
+        ++mediaRevision;
+        showMediaJob(j);
+        scheduleMediaPoll();
+    }
+
+    async function pollMedia() {
+        const revision = mediaRevision;
+        try {
+            const j = await api('media/job');
+            if (revision === mediaRevision) showMediaJob(j);
+        } catch (e) {
+            if (mediaActive && upgrade.root.open) message(upgrade.progress, '暂时无法读取进度。', true);
+        } finally {
+            if (revision === mediaRevision) scheduleMediaPoll();
+        }
     }
     pollMedia();
     window.rkSettings = {openNetwork, openSSH, drawFirewallTrial, firewallTrialActive:() => !!fwTrial};
