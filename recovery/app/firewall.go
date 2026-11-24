@@ -292,6 +292,48 @@ func handleFirewallStatus(w http.ResponseWriter, r *http.Request) {
 		"natRules": groups["nat"], "trial": viewFirewallTrial(f.trial), "persistent": f.store != nil, "message": f.message})
 }
 
+type setupFirewallSnapshot struct {
+	Config     firewallSave
+	Trial      *firewallTrial
+	Persistent bool
+	Message    string
+}
+
+type setupFirewallEdit struct{ Before, Config firewallSave }
+
+func handleSetupFirewall(w http.ResponseWriter, r *http.Request) {
+	f := &recoveryFirewall
+	switch r.Method {
+	case http.MethodGet:
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		jsonOK(w, setupFirewallSnapshot{f.state, f.trial, f.store != nil, f.message})
+	case http.MethodPost:
+		var edit setupFirewallEdit
+		if err := decodeSettingsRequest(w, r, &edit, 48<<10); err != nil {
+			jsonErr(w, http.StatusBadRequest, "无效防火墙请求")
+			return
+		}
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if edit.Before.Enabled != f.state.Enabled || !slices.Equal(edit.Before.Rules, f.state.Rules) {
+			jsonErr(w, http.StatusConflict, "防火墙设置已变化；请放弃此页更改并重新读取")
+			return
+		}
+		for i := range edit.Config.Rules {
+			edit.Config.Rules[i].ID = 0
+		}
+		t, err := f.preview(edit.Config)
+		if err != nil {
+			jsonErr(w, http.StatusConflict, err.Error())
+			return
+		}
+		jsonOK(w, viewFirewallTrial(t))
+	default:
+		jsonErr(w, http.StatusMethodNotAllowed, "仅支持 GET/POST")
+	}
+}
+
 func handleFirewallChange(action string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {

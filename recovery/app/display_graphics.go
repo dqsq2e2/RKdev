@@ -273,6 +273,37 @@ func (p *setupPainter) box(x, y, w, h int, rgb uint32) {
 	draw.Draw(p.image, image.Rect(x, y, x+w, y+h), image.NewUniform(setupColor(rgb)), image.Point{}, draw.Src)
 }
 
+func (p *setupPainter) width(s string) int {
+	w := 0
+	for _, ch := range s {
+		g, ok := p.glyphs[ch]
+		if !ok {
+			g = p.glyphs['?']
+		}
+		w += g.width
+	}
+	return w
+}
+
+func (p *setupPainter) wrap(x, y, limit, lines int, s string, rgb uint32) {
+	for line := 0; line < lines && s != ""; line++ {
+		n, w := 0, 0
+		for i, ch := range s {
+			w += p.width(string(ch))
+			if w > limit-x || ch == '\n' {
+				n = i
+				break
+			}
+			n = len(s)
+		}
+		if n == 0 {
+			break
+		}
+		p.text(x, y+line*24, limit, s[:n], rgb)
+		s = strings.TrimLeft(s[n:], " \n")
+	}
+}
+
 func (p *setupPainter) text(x, y, limit int, s string, rgb uint32) {
 	c := setupColor(rgb)
 	for _, ch := range s {

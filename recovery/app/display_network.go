@@ -3,10 +3,10 @@ package main
 import (
 	"fmt"
 	"net/netip"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
-	"time"
 )
 
 type setupNetState struct {
@@ -20,15 +20,51 @@ type setupNetState struct {
 	Trial                                          *networkTrial
 }
 type setupNetworkModel struct {
-	draft networkConfig
+	base, draft     networkConfig
+	loaded          bool
+	loadingDefaults bool
+	io              setupSettingIO
 }
+
+func (n *setupNetworkModel) changed() bool {
+	return !reflect.DeepEqual(n.draft, n.base)
+}
+
+type setupSettingIO struct {
+	reading  bool
+	revision uint64
+}
+
+func (op *setupSettingIO) read(u *setupUI, path string, dst any, done func(error)) {
+	if op.reading {
+		return
+	}
+	op.reading = true
+	rev := op.revision
+	u.async(func() error { return u.api(path, nil, dst) }, func(err error) {
+		op.reading = false
+		if rev == op.revision {
+			done(err)
+		}
+	})
+}
+
 type setupFirewallModel struct {
-	Enabled                            bool
-	InputRules, ForwardRules, NatRules []firewallRule
-	Trial                              *firewallTrial
-	newRule                            firewallRule
-	Message                            string
+	live        setupFirewallSnapshot
+	base, draft firewallSave
+	loaded      bool
+	newRule     firewallRule
 }
+
+func (f *setupFirewallModel) changed() bool {
+	return f.draft.Enabled != f.base.Enabled || !slices.Equal(f.draft.Rules, f.base.Rules)
+}
+
+func cloneSetupFirewall(c firewallSave) firewallSave {
+	c.Rules = slices.Clone(c.Rules)
+	return c
+}
+
 type setupSSHModel struct {
 	Supported, Persistent bool
 	Config                sshConfig
@@ -48,17 +84,17 @@ func editSetupString(u *setupUI, label string, text *string, updated func()) set
 
 type setupOption struct{ key, label string }
 
-func setupChoice(label string, value *string, options []setupOption, updated func()) setupRow {
+func (u *setupUI) choice(label string, value *string, options []setupOption, updated func()) setupRow {
 	i := slices.IndexFunc(options, func(o setupOption) bool { return o.key == *value })
 	desc := *value
 	if i >= 0 {
 		desc = options[i].label
 	}
+	if len(options) == 0 {
+		return setupRow{label, desc, nil}
+	}
 	return setupRow{label, desc, func() {
-		if len(options) > 0 {
-			*value = options[(i+1)%len(options)].key
-			updated()
-		}
+		u.choose(label, options, max(0, i), func(key string) { *value = key; updated() })
 	}}
 }
 
@@ -67,103 +103,117 @@ func setupToggle(label string, value *bool, updated func()) setupRow {
 }
 
 func (u *setupUI) loadNetworkPage() {
-	var state setupNetState
-	if err := u.api("network/config", nil, &state); err != nil {
-		u.fail(err)
-	} else {
-		u.trial = state
-		u.network.draft = state.Config
-	}
-	if u.group == "防火墙" {
-		u.loadFirewall()
-	}
 	u.showNetwork()
+	u.refreshNetwork(true)
 }
-func (u *setupUI) loadFirewall() {
-	r := u.firewall.newRule
-	var fresh setupFirewallModel
-	if err := u.api("firewall/status", nil, &fresh); err != nil {
-		u.fail(err)
-		return
-	}
-	u.firewall = fresh
-	u.firewall.newRule = r
+
+func cloneSetupNetwork(c networkConfig) networkConfig {
+	c.WAN.DNS = slices.Clone(c.WAN.DNS)
+	c.LAN.Ports = slices.Clone(c.LAN.Ports)
+	return c
+}
+
+func (u *setupUI) resetNetworkDraft() {
+	u.network.draft = cloneSetupNetwork(u.network.base)
+}
+
+func (u *setupUI) loadFirewall(reportError bool) {
+	var fresh setupFirewallSnapshot
+	u.firewallIO.read(u, "setup/firewall", &fresh, func(err error) {
+		inGroup := u.page == setupPageNetwork && u.group == "防火墙"
+		if err != nil {
+			if reportError && inGroup {
+				u.fail(err)
+			}
+		} else {
+			f := &u.firewall
+			f.live = fresh
+			if !f.changed() && u.dialog == nil {
+				f.loaded, f.base, f.draft = true, fresh.Config, cloneSetupFirewall(fresh.Config)
+			}
+		}
+		if inGroup {
+			u.showNetwork()
+		}
+	})
 }
 
 func (u *setupUI) updateNetwork() {
+	u.refreshNetwork(false)
+	u.showNetwork()
+}
+
+func (u *setupUI) refreshNetwork(reportError bool) {
 	var state setupNetState
-	if err := u.api("network/config", nil, &state); err == nil {
-		was := u.trial.Trial
-		if was != nil && state.Trial == nil {
-			u.network.draft = state.Config
+	u.network.io.read(u, "network/config", &state, func(err error) {
+		if err != nil {
+			if reportError && u.page == setupPageNetwork {
+				u.fail(err)
+			}
+		} else {
+			u.trial = state
+			if state.Trial == nil && !u.network.changed() && u.dialog == nil {
+				u.network.loaded, u.network.base = true, state.Config
+				u.resetNetworkDraft()
+			}
 		}
-		u.trial = state
-	}
+		if u.page == setupPageNetwork {
+			u.showNetwork()
+		}
+	})
 	if u.group == "防火墙" {
-		u.loadFirewall()
+		u.loadFirewall(reportError)
 	}
-	u.showNetwork()
 }
 
-func (u *setupUI) applyNet(op string) {
-	req := map[string]any{"action": op}
-	if op == "apply" {
-		req["config"] = u.network.draft
-	}
-	var t networkTrial
-	if err := u.api("network/config", req, &t); err != nil {
-		u.fail(err)
-		return
-	}
-	u.trial.Trial = &t
-	u.showNetwork()
-}
-
-func (u *setupUI) trialNet(op string) {
-	if u.trial.Trial == nil {
-		return
-	}
-	if err := u.api("network/config", map[string]string{"action": op, "id": u.trial.Trial.ID}, nil); err != nil {
-		u.fail(err)
-	} else {
-		u.loadNetworkPage()
-	}
+func (u *setupUI) networkDefaults() {
+	u.confirm("载入默认网络设置", "替换 WAN、LAN 和 Wi-Fi 草稿。", func() {
+		var c networkConfig
+		visit := u.visit
+		u.network.loadingDefaults = true
+		u.showNetwork()
+		u.async(func() error { return u.api("setup/network_defaults", nil, &c) }, func(err error) {
+			u.network.loadingDefaults = false
+			if u.visit != visit {
+				return
+			}
+			u.fail(err)
+			if err == nil {
+				u.network.draft = c
+			}
+			u.showNetwork()
+		})
+	})
 }
 
 func (u *setupUI) showNetwork() {
 	n := &u.trial
 	c := &u.network.draft
 	var rows []setupRow
-	hint := "WAN、LAN、Wi-Fi 与防火墙使用相同的恢复配置。"
+	hint := ""
+	if u.network.loadingDefaults {
+		u.define("正在读取默认配置…")
+		return
+	}
 	if n.Trial != nil {
-		t := n.Trial
-		remaining := max(0, int(time.Until(t.Deadline).Seconds()+1))
-		hint = "正在试用网络，新管理地址：" + t.LANURL
-		rows = append(rows, setupRow{"自动回退", fmt.Sprintf("%d 秒", remaining), nil})
-		if t.Status == "ready" && remaining > 0 {
-			if n.Warning == "" {
-				rows = append(rows, setupRow{"确认配置", "", func() { u.trialNet("confirm") }})
-			}
-			rows = append(rows, setupRow{"回退网络配置", "", func() { u.trialNet("revert") }})
-		}
-		if n.Warning != "" {
-			rows = append(rows, setupRow{n.Warning, "", nil})
-		}
-		u.define(hint, rows...)
+		u.define("已有网络配置正在试用", setupRow{"自动回退", fmt.Sprintf("%d 秒", trialSeconds(n.Trial.Deadline)), nil})
 		return
 	}
 	if u.group == "" {
 		for _, part := range []struct{ name, value string }{
-			{"WAN", n.Addresses[n.Config.WAN.Port]}, {"LAN", n.LANActual}, {"Wi-Fi", n.Config.WiFi.SSID}, {"防火墙", "规则与地址转换"},
+			{"WAN", n.Addresses[n.Config.WAN.Port]}, {"LAN", n.LANActual}, {"Wi-Fi", c.WiFi.SSID}, {"防火墙", ""},
 		} {
 			rows = append(rows, setupRow{part.name, part.value, func() {
 				u.group = part.name
 				u.selected = 0
 				if u.group == "防火墙" {
-					u.loadFirewall()
+					u.loadFirewall(true)
 				}
 				u.showNetwork()
 			}})
+		}
+		if u.network.loaded && n.Supported && n.Ready {
+			rows = append(rows, setupRow{"载入默认网络设置", "", u.networkDefaults})
 		}
 		u.define(hint, rows...)
 		return
@@ -172,7 +222,7 @@ func (u *setupUI) showNetwork() {
 		u.showFirewall()
 		return
 	}
-	if !n.Supported || !n.Ready {
+	if !u.network.loaded || !n.Supported || !n.Ready {
 		desc := n.Message
 		if desc == "" {
 			desc = "设备网络尚未就绪"
@@ -191,8 +241,8 @@ func (u *setupUI) showNetwork() {
 			ports = append(ports, setupOption{p.ID, p.Label + "  " + n.Names[p.ID]})
 		}
 		rows = append(rows,
-			setupChoice("物理网口", &c.WAN.Port, ports, refresh),
-			setupChoice("连接方式", &c.WAN.Mode, []setupOption{{"dhcp", "自动获取 DHCP"}, {"static", "静态 IPv4"}, {"off", "关闭"}}, refresh))
+			u.choice("物理网口", &c.WAN.Port, ports, refresh),
+			u.choice("连接方式", &c.WAN.Mode, []setupOption{{"dhcp", "自动获取 DHCP"}, {"static", "静态 IPv4"}, {"off", "关闭"}}, refresh))
 		if c.WAN.Mode == "static" {
 			rows = append(rows, editSetupString(u, "IPv4 / 前缀", &c.WAN.Address, refresh), editSetupString(u, "默认网关", &c.WAN.Gateway, refresh))
 		}
@@ -226,7 +276,7 @@ func (u *setupUI) showNetwork() {
 		if n.Station {
 			modes = append(modes, setupOption{"station", "无线客户端"})
 		}
-		rows = append(rows, setupChoice("工作模式", &c.WiFi.Mode, modes, refresh))
+		rows = append(rows, u.choice("工作模式", &c.WiFi.Mode, modes, refresh))
 		if c.WiFi.Mode != "off" {
 			rows = append(rows, editSetupString(u, "SSID", &c.WiFi.SSID, refresh))
 			if c.WiFi.Mode == "ap" {
@@ -234,7 +284,7 @@ func (u *setupUI) showNetwork() {
 				for _, b := range n.APBands {
 					options = append(options, setupOption{b, b + " GHz"})
 				}
-				rows = append(rows, setupChoice("频段", &c.WiFi.Band, options, func() {
+				rows = append(rows, u.choice("频段", &c.WiFi.Band, options, func() {
 					c.WiFi.Channel = 6
 					if c.WiFi.Band == "5" {
 						c.WiFi.Channel = 36
@@ -261,52 +311,43 @@ func (u *setupUI) showNetwork() {
 			}})
 		}
 	}
-	rows = append(rows, setupRow{"试用配置", "90 秒后自动回退", func() { u.applyNet("apply") }},
-		setupRow{"试用板包默认配置", "", func() { u.applyNet("defaults") }})
 	u.define(hint, rows...)
 }
 
 func (u *setupUI) showFirewall() {
 	f := &u.firewall
+	if !f.loaded {
+		u.define("正在读取防火墙设置…")
+		return
+	}
 	if u.group == "fw-add" {
 		u.showFirewallRule()
 		return
 	}
-	if t := f.Trial; t != nil {
-		left := max(0, int(time.Until(t.Deadline).Seconds()+1))
-		rows := []setupRow{{"自动回退", fmt.Sprintf("%d 秒", left), nil}}
-		if left > 0 && t.Status == "ready" {
-			for _, a := range []setupOption{{"confirm", "确认规则"}, {"revert", "回退规则"}} {
-				rows = append(rows, setupRow{a.label, "", func() {
-					u.firewallEdit("trial", map[string]string{"trial": t.ID, "operation": a.key})
-				}})
-			}
-		}
-		u.define("试用防火墙设置。", rows...)
+	if t := f.live.Trial; t != nil {
+		u.define("已有防火墙配置正在试用", setupRow{"自动回退", fmt.Sprintf("%d 秒", trialSeconds(t.Deadline)), nil})
 		return
 	}
 	rows := []setupRow{
-		{"防火墙", setupYes(f.Enabled), func() { u.firewallEdit("toggle", map[string]bool{"enabled": !f.Enabled}) }},
+		setupToggle("防火墙", &f.draft.Enabled, u.showFirewall),
 		{"添加规则", "", func() {
 			u.group = "fw-add"
 			u.selected = 0
-			f.newRule = firewallRule{Chain: "input", Action: "ACCEPT", Protocol: "all"}
+			if f.newRule.Chain == "" {
+				f.newRule = firewallRule{Chain: "input", Action: "ACCEPT", Protocol: "all"}
+			}
 			u.showFirewallRule()
 		}},
 	}
-	for _, group := range [][]firewallRule{f.InputRules, f.ForwardRules, f.NatRules} {
-		for _, r := range group {
-			rows = append(rows, setupRow{r.Chain + "  " + r.Action, strings.Join([]string{r.Protocol, r.SrcIP, r.DstIP, r.DstPort, r.NatTarget}, "  "), func() {
-				u.confirm("删除防火墙规则", r.Chain+"  "+r.Action, func() {
-					u.firewallEdit("delete", map[string]any{"id": r.ID, "chain": r.Chain})
-				})
-			}})
-		}
+	for i, r := range f.draft.Rules {
+		rows = append(rows, setupRow{r.Chain + "  " + r.Action, strings.Join([]string{r.Protocol, r.SrcIP, r.DstIP, r.DstPort, r.NatTarget}, "  "), func() {
+			u.confirm("删除防火墙规则", r.Chain+"  "+r.Action, func() {
+				f.draft.Rules = slices.Delete(f.draft.Rules, i, i+1)
+				u.showFirewall()
+			})
+		}})
 	}
-	if u.message == "" {
-		u.message = f.Message
-	}
-	u.define("管理入站、转发与地址转换规则。", rows...)
+	u.define("", rows...)
 }
 func (u *setupUI) showFirewallRule() {
 	r := &u.firewall.newRule
@@ -317,14 +358,14 @@ func (u *setupUI) showFirewallRule() {
 		actions = []setupOption{{"dnat", "端口转发"}, {"masquerade", "IP 伪装"}}
 	}
 	rows := []setupRow{
-		setupChoice("规则类型", &r.Chain, chains, func() {
+		u.choice("规则类型", &r.Chain, chains, func() {
 			r.Action, r.Protocol, r.SrcIP, r.DstIP, r.DstPort, r.NatTarget = "ACCEPT", "all", "", "", "", ""
 			if r.Chain == "nat" {
 				r.Action, r.Protocol = "dnat", "tcp"
 			}
 			refresh()
 		}),
-		setupChoice("动作", &r.Action, actions, func() {
+		u.choice("动作", &r.Action, actions, func() {
 			if r.Action == "masquerade" {
 				r.Protocol, r.DstPort, r.NatTarget = "all", "", ""
 			}
@@ -336,7 +377,7 @@ func (u *setupUI) showFirewallRule() {
 		if r.Chain != "nat" {
 			protos = append(protos, setupOption{"all", "全部"}, setupOption{"icmp", "ICMP"})
 		}
-		rows = append(rows, setupChoice("协议", &r.Protocol, protos, func() {
+		rows = append(rows, u.choice("协议", &r.Protocol, protos, func() {
 			if r.Protocol != "tcp" && r.Protocol != "udp" {
 				r.DstPort = ""
 			}
@@ -350,29 +391,48 @@ func (u *setupUI) showFirewallRule() {
 	if r.Action == "dnat" {
 		rows = append(rows, editSetupString(u, "转发至 IPv4:端口", &r.NatTarget, refresh))
 	}
-	rows = append(rows, setupRow{"添加并试用", "", func() { u.firewallEdit("apply", *r) }})
-	u.define("Enter 切换选项或编辑字段。", rows...)
-}
-
-func (u *setupUI) firewallEdit(path string, request any) {
-	if err := u.api("firewall/"+path, request, nil); err != nil {
-		u.fail(err)
-		return
-	}
-	u.message = ""
-	u.group = "防火墙"
-	u.selected = 0
-	u.loadFirewall()
-	u.showFirewall()
+	rows = append(rows, setupRow{"添加规则", "", func() {
+		if _, _, err := ruleArgs(*r); err != nil {
+			u.fail(err)
+			return
+		}
+		f := &u.firewall
+		if len(f.draft.Rules) >= 48 {
+			u.message = "最多可保存 48 条防火墙规则"
+			return
+		}
+		f.draft.Rules = append(f.draft.Rules, *r)
+		f.newRule = firewallRule{}
+		u.group, u.message = "防火墙", ""
+		u.selected = len(f.draft.Rules) + 1
+		u.showFirewall()
+	}})
+	u.define("", rows...)
 }
 
 func (u *setupUI) loadSSH() {
-	u.fail(u.api("ssh/config", nil, &u.ssh))
 	u.showSSH()
+	var v setupSSHModel
+	u.sshIO.read(u, "ssh/config", &v, func(err error) {
+		if err == nil && !u.sshChanged() && u.dialog == nil {
+			u.ssh, u.sshDraft, u.sshLoaded = v, v.Config, true
+		}
+		if u.page == setupPageSSH {
+			u.fail(err)
+			u.showSSH()
+		}
+	})
 }
+
+func (u *setupUI) sshChanged() bool { return u.sshDraft != u.ssh.Config }
+
 func (u *setupUI) showSSH() {
 	s := &u.ssh
-	c := &s.Config
+	c := &u.sshDraft
+	if !u.sshLoaded {
+		u.define("正在读取 SSH 设置…")
+		return
+	}
 	if !s.Supported {
 		u.define("", setupRow{"此板包未启用可配置 SSH", "", nil})
 		return
@@ -396,16 +456,8 @@ func (u *setupUI) showSSH() {
 		{"清空公钥", "", func() {
 			u.confirm("清空公钥", "保存后从恢复系统移除已配置公钥。", func() { c.Keys = ""; u.showSSH() })
 		}},
-		{"保存并应用", "", func() {
-			var r struct{ Message string }
-			if err := u.api("ssh/config", *c, &r); err != nil {
-				u.fail(err)
-			} else {
-				u.message = r.Message
-			}
-		}},
 	}
-	hint := "配置远程登录。物理终端会继续使用本地账号。"
+	hint := ""
 	if !s.Persistent {
 		hint = "这些设置仅在本次启动中生效。"
 	}

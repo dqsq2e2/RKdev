@@ -395,6 +395,24 @@ func (n *netController) finish(id, action string, now time.Time) (string, error)
 	return message, nil
 }
 
+func handleSetupNetworkDefaults(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		jsonErr(w, http.StatusMethodNotAllowed, "仅支持 GET")
+		return
+	}
+	n := netConfigController
+	if n == nil {
+		jsonErr(w, http.StatusConflict, "板包尚未提供可配置的网口定义")
+		return
+	}
+	c := n.defaults.Config
+	if c.WiFi.Password == nil {
+		empty := ""
+		c.WiFi.Password = &empty
+	}
+	jsonOK(w, c)
+}
+
 func handleNetworkConfig(w http.ResponseWriter, r *http.Request) {
 	n := netConfigController
 	if r.Method == http.MethodGet {

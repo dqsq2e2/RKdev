@@ -314,6 +314,103 @@ func protectedEnv(name string) bool {
 	}, name)
 }
 
+func bootVars(values map[string]string) []UbootVar {
+	vars := make([]UbootVar, 0, len(values))
+	for _, key := range slices.Sorted(maps.Keys(values)) {
+		vars = append(vars, UbootVar{key, values[key], protectedEnv(key)})
+	}
+	return vars
+}
+
+type setupBootSnapshot struct {
+	Vars, Defaults      []UbootVar
+	Order, DefaultOrder []string
+	Available           []string
+	Revision, Problem   string
+	Installing          bool
+}
+
+type setupBootEdit struct {
+	Order    []string
+	Vars     map[string]string
+	Revision string
+	Defaults bool
+}
+
+func bootRevision(values map[string]string) string {
+	data, _ := json.Marshal(values)
+	return fmt.Sprintf("%x", sha256.Sum256(data))
+}
+
+func handleSetupBoot(w http.ResponseWriter, r *http.Request) {
+	l := currentLayout
+	switch r.Method {
+	case http.MethodGet:
+		if !releaseWriteMu.TryLock() {
+			jsonErr(w, http.StatusConflict, "已有写入任务")
+			return
+		}
+		defer releaseWriteMu.Unlock()
+		e, err := l.loadEnvironment()
+		if err != nil && !errors.Is(err, errEnvironmentCRC) {
+			jsonErr(w, http.StatusConflict, err.Error())
+			return
+		}
+		s := setupBootSnapshot{DefaultOrder: l.BootOrder, Available: append(slices.Clone(l.BootOrder), "recovery")}
+		if defaults, err := l.defaultEnvironment(); err == nil {
+			s.Defaults = bootVars(defaults)
+		}
+		if err != nil {
+			s.Revision, s.Problem = "invalid-crc", err.Error()
+		} else {
+			s.Vars, s.Revision = bootVars(e.values), bootRevision(e.values)
+			s.Installing = e.values["rkdev_installing"] != ""
+			s.Order = strings.Fields(e.values["rkdev_targets"])
+			if l.validateOrder(s.Order) != nil {
+				s.Order = l.BootOrder
+			}
+		}
+		jsonOK(w, s)
+	case http.MethodPost:
+		var req setupBootEdit
+		if err := decodeSettingsRequest(w, r, &req, 128<<10); err != nil || req.Revision == "" {
+			jsonErr(w, http.StatusBadRequest, "引导设置请求无效")
+			return
+		}
+		if err := l.validateOrder(req.Order); err != nil {
+			jsonErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		for k, v := range req.Vars {
+			if !envName.MatchString(k) || protectedEnv(k) || strings.ContainsRune(v, 0) {
+				jsonErr(w, http.StatusBadRequest, "环境变量无效或受保护")
+				return
+			}
+		}
+		repair := req.Defaults && req.Revision == "invalid-crc"
+		writeEnvResponse(w, repair, func(values map[string]string) (map[string]string, error) {
+			if (repair && values["rkdev_layout"] != "") || (!repair && bootRevision(values) != req.Revision) {
+				return nil, fmt.Errorf("U-Boot 环境已变化；请放弃此页更改并重新读取")
+			}
+			if req.Defaults {
+				defaults, err := l.defaultEnvironment()
+				if err != nil {
+					return nil, err
+				}
+				if flag := values["rkdev_installing"]; flag != "" {
+					defaults["rkdev_installing"] = flag
+				}
+				values = defaults
+			}
+			maps.Copy(values, req.Vars)
+			values["rkdev_targets"] = strings.Join(req.Order, " ")
+			return values, nil
+		})
+	default:
+		jsonErr(w, http.StatusMethodNotAllowed, "仅支持 GET/POST")
+	}
+}
+
 func handleBootOrder(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -327,10 +424,7 @@ func handleBootOrder(w http.ResponseWriter, r *http.Request) {
 			jsonErr(w, http.StatusConflict, err.Error())
 			return
 		}
-		vars := make([]UbootVar, 0, len(e.values))
-		for _, key := range slices.Sorted(maps.Keys(e.values)) {
-			vars = append(vars, UbootVar{key, e.values[key], protectedEnv(key)})
-		}
+		vars := bootVars(e.values)
 		order := strings.Fields(e.values["rkdev_targets"])
 		if currentLayout.validateOrder(order) != nil {
 			order = currentLayout.BootOrder

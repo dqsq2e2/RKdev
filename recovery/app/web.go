@@ -27,6 +27,17 @@ func decodeSettingsRequest(w http.ResponseWriter, r *http.Request, dst any, limi
 	return nil
 }
 
+func setupLocal(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		peer, err := netip.ParseAddrPort(r.RemoteAddr)
+		if err != nil || !peer.Addr().Unmap().IsLoopback() {
+			jsonErr(w, http.StatusForbidden, "仅供本机设置使用")
+			return
+		}
+		next(w, r)
+	}
+}
+
 func recoveryWeb(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")

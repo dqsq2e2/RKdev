@@ -543,6 +543,9 @@ func main() {
 	http.HandleFunc("/api/firewall/toggle", handleFirewallChange("toggle"))
 	http.HandleFunc("/api/firewall/trial", handleFirewallChange("trial"))
 	http.HandleFunc("/api/ssh/config", handleSSHConfig)
+	http.HandleFunc("/api/setup/boot", setupLocal(handleSetupBoot))
+	http.HandleFunc("/api/setup/firewall", setupLocal(handleSetupFirewall))
+	http.HandleFunc("/api/setup/network_defaults", setupLocal(handleSetupNetworkDefaults))
 
 	http.HandleFunc("/api/terminal", func(w http.ResponseWriter, r *http.Request) {
 		if err := currentLayout.checkMedium(false); err != nil {

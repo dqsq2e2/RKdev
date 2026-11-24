@@ -18,7 +18,18 @@ import (
 	"unicode/utf8"
 )
 
-var setupPages = []string{"系统概览", "引导设置", "固件刷写", "恢复更新", "网络配置", "SSH 配置", "终端"}
+const (
+	setupPageMain = iota
+	setupPageBoot
+	setupPageNetwork
+	setupPageSSH
+	setupPageFlash
+	setupPageUpdate
+	setupPageTerminal
+	setupPageExit
+)
+
+var setupPages = [...]string{"概览", "引导", "网络", "SSH", "刷写", "更新", "终端", "退出"}
 
 type setupRow struct {
 	label, detail string
@@ -30,10 +41,33 @@ type setupDialog struct {
 	input       bool
 	secret      bool
 	value       string
+	cursor      int
+	options     []setupOption
+	selected    int
 	finish      func(string)
 }
 
+type setupProfile struct {
+	Board        string
+	Profile      string
+	Device       string
+	OnlineUpdate bool `json:"online_update"`
+	Writable     bool
+	Message      string
+}
+
+type setupOverview struct {
+	profile setupProfile
+	cpu     CpuInfo
+	network NetworkInfo
+	emmc    struct{ Devices []EmmcHealth }
+	emmcErr error
+	lan     string
+}
+
 type setupUI struct {
+	ctx                      context.Context
+	completed                chan func()
 	client                   *http.Client
 	tty                      *setupTTY
 	page, selected, scrolled int
@@ -42,46 +76,72 @@ type setupUI struct {
 	rows                     []setupRow
 	dialog                   *setupDialog
 	dirty                    bool
+	visit                    uint64
 	lastOverview             time.Time
+	overviewPending          bool
 	boot                     setupBootState
+	bootIO                   setupSettingIO
 	media                    setupMediaState
+	mediaListIO              setupSettingIO
+	mediaJobIO               setupSettingIO
+	mediaRevision            uint64
+	mediaStarting            bool
 	trial                    setupNetState
 	network                  setupNetworkModel
 	firewall                 setupFirewallModel
+	firewallIO               setupSettingIO
+	sshIO                    setupSettingIO
 	ssh                      setupSSHModel
-	profile                  struct {
-		Board        string
-		Profile      string
-		Device       string
-		OnlineUpdate bool `json:"online_update"`
-		Writable     bool
-		Message      string
-	}
+	sshDraft                 sshConfig
+	sshLoaded                bool
+	profile                  setupProfile
+	save                     *setupSave
+	rebooting                bool
 }
 
-func newSetupUI(tty *setupTTY) *setupUI {
-	return &setupUI{tty: tty, client: &http.Client{
-		Timeout:       3500 * time.Millisecond,
+func newSetupUI(ctx context.Context, tty *setupTTY) *setupUI {
+	return &setupUI{ctx: ctx, tty: tty, completed: make(chan func()), client: &http.Client{
 		Transport:     &http.Transport{DisableCompression: true, MaxIdleConns: 2, IdleConnTimeout: 10 * time.Second},
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}}
 }
 
 func (u *setupUI) api(path string, req, dst any) error {
+	return u.call(u.ctx, path, req, dst)
+}
+
+func (u *setupUI) call(ctx context.Context, path string, req, dst any) error {
 	url := "http://127.0.0.1/api/" + path
-	var r *http.Response
-	var err error
-	if req == nil {
-		r, err = u.client.Get(url)
-	} else {
-		data, _ := json.Marshal(req)
-		r, err = u.client.Post(url, "application/json", bytes.NewReader(data))
+	method := http.MethodGet
+	var data []byte
+	budget := 3500 * time.Millisecond
+	if req != nil {
+		var err error
+		data, err = json.Marshal(req)
+		if err != nil {
+			return err
+		}
+		method = http.MethodPost
+		budget = 30 * time.Second
 	}
+	ctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(data))
 	if err != nil {
+		return err
+	}
+	if req != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	r, err := u.client.Do(request)
+	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return fmt.Errorf("恢复服务请求超时")
+		}
 		return fmt.Errorf("恢复服务暂未就绪")
 	}
 	defer r.Body.Close()
-	if r.StatusCode >= 400 {
+	if r.StatusCode < 200 || r.StatusCode >= 300 {
 		var status struct{ Error string }
 		_ = json.NewDecoder(r.Body).Decode(&status)
 		if status.Error == "" {
@@ -95,7 +155,20 @@ func (u *setupUI) api(path string, req, dst any) error {
 	return json.NewDecoder(r.Body).Decode(dst)
 }
 
+// Work reads into private snapshots; only the display loop changes the UI.
+func (u *setupUI) async(work func() error, done func(error)) {
+	go func() {
+		err := work()
+		select {
+		case u.completed <- func() { done(err) }:
+		case <-u.ctx.Done():
+		}
+	}()
+}
+
 func runSetup() error {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
 	frame, err := openFramebuffer()
 	for range 8 {
 		if err == nil {
@@ -112,16 +185,24 @@ func runSetup() error {
 	if err != nil {
 		return err
 	}
+	u := newSetupUI(ctx, nil)
+	defer u.client.CloseIdleConnections()
+	overview, err := u.awaitOverview()
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
+		return err
+	}
 	tty, err := openSetupTTY()
 	if err != nil {
 		return err
 	}
 	defer tty.file.Close()
 	defer tty.text()
-	u := newSetupUI(tty)
-	u.enter(0)
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer stop()
+	u.tty = tty
+	u.lastOverview = time.Now()
+	u.showOverview(overview)
 	poll := time.NewTicker(35 * time.Millisecond)
 	defer poll.Stop()
 	update := time.NewTicker(time.Second)
@@ -142,6 +223,9 @@ func runSetup() error {
 			return nil
 		case <-update.C:
 			u.update()
+			u.dirty = true
+		case done := <-u.completed:
+			done()
 			u.dirty = true
 		case <-poll.C:
 			var buf [256]byte
@@ -182,7 +266,9 @@ func setupKey(b []byte, elapsed bool) (string, int) {
 			if x >= 0x40 && x <= 0x7e {
 				key := map[string]string{
 					"[A": "Up", "[B": "Down", "[C": "Right", "[D": "Left", "OA": "Up", "OB": "Down", "OC": "Right", "OD": "Left",
-					"[[A": "F1", "[[E": "F5", "[15~": "F5", "[5~": "PageUp", "[6~": "PageDown", "[H": "Home", "[F": "End",
+					"[[A": "F1", "[[E": "F5", "[15~": "F5", "[5~": "PageUp", "[6~": "PageDown",
+					"[H": "Home", "[1~": "Home", "[7~": "Home", "[F": "End", "[4~": "End", "[8~": "End",
+					"[21~": "F10", "[3~": "Delete", "OM": "Enter", "Ok": "+", "Om": "-",
 				}[string(b[1:i+1])]
 				return key, i + 1
 			}
@@ -199,6 +285,8 @@ func setupKey(b []byte, elapsed bool) (string, int) {
 		return "Backspace", 1
 	case '\t':
 		return "Tab", 1
+	case 21:
+		return "Clear", 1
 	case 3:
 		return "Escape", 1
 	}
@@ -214,20 +302,20 @@ func setupKey(b []byte, elapsed bool) (string, int) {
 
 func (u *setupUI) key(key string) {
 	if u.dialog != nil {
-		d := u.dialog
+		u.dialogKey(key)
+		return
+	}
+	if u.rebooting {
+		return
+	}
+	if u.save != nil {
 		switch key {
-		case "Escape":
-			u.dialog = nil
+		case "Up", "Down", "Home", "End":
+			u.moveSelection(key)
 		case "Enter":
-			u.dialog = nil
-			d.finish(d.value)
-		case "Backspace":
-			_, n := utf8.DecodeLastRuneInString(d.value)
-			d.value = d.value[:len(d.value)-n]
-		default:
-			if d.input && utf8.RuneCountInString(key) == 1 && len(d.value)+len(key) <= 8192 {
-				d.value += key
-			}
+			u.runSelection()
+		case "Escape":
+			u.finishSetupTrial(false)
 		}
 		return
 	}
@@ -237,25 +325,99 @@ func (u *setupUI) key(key string) {
 	case "Right", "Tab":
 		u.enter((u.page + 1) % len(setupPages))
 	case "Up", "Down", "PageUp", "PageDown", "Home", "End":
-		offset := map[string]int{"Up": -1, "Down": 1, "PageUp": -8, "PageDown": 8, "Home": -len(u.rows), "End": len(u.rows)}[key]
-		u.selected = min(max(0, u.selected+offset), max(0, len(u.rows)-1))
+		u.moveSelection(key)
 	case "Enter":
-		if u.selected < len(u.rows) && u.rows[u.selected].run != nil {
-			u.rows[u.selected].run()
-		}
+		u.runSelection()
 	case "F5":
 		u.refresh()
+	case "F10":
+		u.savePrompt(true)
 	case "+", "=", "-":
-		if u.page == 1 && u.group == "" {
-			u.moveBoot(key != "-")
+		if u.page == setupPageBoot && u.group == "" {
+			delta := -1
+			if key == "-" {
+				delta = 1
+			}
+			u.moveBoot(delta)
 		}
 	case "Escape":
 		u.back()
 	}
 }
 
+func (u *setupUI) runSelection() {
+	if u.selected < len(u.rows) && u.rows[u.selected].run != nil {
+		u.rows[u.selected].run()
+	}
+}
+
+func (u *setupUI) moveSelection(key string) {
+	offset := map[string]int{"Up": -1, "Down": 1, "PageUp": -9, "PageDown": 9, "Home": -len(u.rows), "End": len(u.rows)}[key]
+	u.selected = min(max(0, u.selected+offset), max(0, len(u.rows)-1))
+}
+
+func (u *setupUI) dialogKey(key string) {
+	d := u.dialog
+	switch key {
+	case "Escape":
+		u.dialog = nil
+		return
+	case "Enter":
+		u.dialog = nil
+		if len(d.options) > 0 {
+			d.value = d.options[d.selected].key
+		}
+		d.finish(d.value)
+		return
+	}
+	if len(d.options) > 0 {
+		switch key {
+		case "Up":
+			d.selected = max(0, d.selected-1)
+		case "Down":
+			d.selected = min(len(d.options)-1, d.selected+1)
+		case "Home":
+			d.selected = 0
+		case "End":
+			d.selected = len(d.options) - 1
+		}
+		return
+	}
+	if !d.input {
+		return
+	}
+	switch key {
+	case "Home":
+		d.cursor = 0
+	case "End":
+		d.cursor = len(d.value)
+	case "Clear":
+		d.value, d.cursor = "", 0
+	case "Left", "Backspace":
+		_, n := utf8.DecodeLastRuneInString(d.value[:d.cursor])
+		d.cursor -= n
+		if key == "Backspace" {
+			d.value = d.value[:d.cursor] + d.value[d.cursor+n:]
+		}
+	case "Right", "Delete":
+		_, n := utf8.DecodeRuneInString(d.value[d.cursor:])
+		if key == "Right" {
+			d.cursor += n
+		} else {
+			d.value = d.value[:d.cursor] + d.value[d.cursor+n:]
+		}
+	default:
+		if utf8.RuneCountInString(key) == 1 && len(d.value)+len(key) <= 8192 {
+			d.value = d.value[:d.cursor] + key + d.value[d.cursor:]
+			d.cursor += len(key)
+		}
+	}
+}
+
 func (u *setupUI) enter(page int) {
+	u.visit++
 	u.page, u.group, u.selected, u.scrolled = page, "", 0, 0
+	u.define("正在读取…")
 	u.message = ""
 	u.refresh()
 }
@@ -267,18 +429,34 @@ func (u *setupUI) define(hint string, rows ...setupRow) {
 }
 
 func (u *setupUI) back() {
+	if u.group == "" && !(u.page == setupPageFlash || u.page == setupPageUpdate) {
+		if u.page == setupPageExit {
+			u.enter(setupPageMain)
+		} else {
+			u.exitPage()
+		}
+		return
+	}
 	switch u.page {
-	case 1:
+	case setupPageBoot:
 		u.group = ""
+		u.selected, u.scrolled = len(u.boot.base.Available), 0
 		u.showBoot()
-	case 2, 3:
-		u.mediaBack()
-	case 4:
+	case setupPageFlash, setupPageUpdate:
+		if u.media.source.ID == "" {
+			u.exitPage()
+		} else {
+			u.mediaBack()
+		}
+	case setupPageNetwork:
 		if u.group == "fw-add" {
 			u.group = "防火墙"
+			u.selected = 1
 		} else {
+			u.selected = map[string]int{"WAN": 0, "LAN": 1, "Wi-Fi": 2, "防火墙": 3}[u.group]
 			u.group = ""
 		}
+		u.scrolled = 0
 		u.showNetwork()
 	}
 }
@@ -286,36 +464,45 @@ func (u *setupUI) back() {
 func (u *setupUI) refresh() {
 	u.message = ""
 	switch u.page {
-	case 0:
+	case setupPageMain:
 		u.loadOverview()
-	case 1:
+	case setupPageBoot:
 		u.loadBoot()
-	case 2, 3:
+	case setupPageFlash, setupPageUpdate:
 		u.loadMediaPage()
-	case 4:
+	case setupPageNetwork:
 		u.loadNetworkPage()
-	case 5:
+	case setupPageSSH:
 		u.loadSSH()
-	case 6:
-		u.define("进入本地登录，退出登录后返回恢复界面。", setupRow{"进入本地终端", "沿用本机账号密码", u.terminal})
+	case setupPageTerminal:
+		u.define("", setupRow{"进入本地终端", "", u.terminal})
+	case setupPageExit:
+		u.showExit()
 	}
 }
 
 func (u *setupUI) update() {
+	if u.save != nil {
+		u.updateSave()
+		return
+	}
 	switch u.page {
-	case 0:
+	case setupPageMain:
 		if time.Since(u.lastOverview) >= 5*time.Second {
 			u.loadOverview()
 		}
-	case 2, 3:
+	case setupPageFlash, setupPageUpdate:
 		u.updateMedia()
-	case 4:
+	case setupPageNetwork:
 		u.updateNetwork()
 	}
 }
 
 func (u *setupUI) change(label, old string, secret bool, fn func(string)) {
-	u.dialog = &setupDialog{title: label, value: old, input: true, secret: secret, finish: fn}
+	u.dialog = &setupDialog{title: label, value: old, cursor: len(old), input: true, secret: secret, finish: fn}
+}
+func (u *setupUI) choose(label string, options []setupOption, selected int, fn func(string)) {
+	u.dialog = &setupDialog{title: label, options: options, selected: selected, finish: fn}
 }
 func (u *setupUI) confirm(label, body string, fn func()) {
 	u.dialog = &setupDialog{title: label, body: body, finish: func(string) { fn() }}
@@ -337,21 +524,63 @@ func (u *setupUI) terminal() {
 	u.fail(u.tty.graphics())
 }
 
+func (u *setupUI) readOverview(ctx context.Context, v *setupOverview) error {
+	for _, req := range []struct {
+		path string
+		dst  any
+	}{{"profile", &v.profile}, {"cpu", &v.cpu}, {"network", &v.network}} {
+		if err := u.call(ctx, req.path, nil, req.dst); err != nil {
+			return err
+		}
+	}
+	v.emmcErr = u.call(ctx, "emmc", nil, &v.emmc)
+	if carrier, _ := os.ReadFile("/sys/class/net/br0/carrier"); strings.TrimSpace(string(carrier)) == "1" {
+		v.lan = setupAddress(runtimeIPv4("br0"))
+	}
+	return nil
+}
+
+func (u *setupUI) awaitOverview() (setupOverview, error) {
+	ctx := u.ctx
+	retry := time.NewTicker(250 * time.Millisecond)
+	defer retry.Stop()
+	for {
+		var v setupOverview
+		if err := u.readOverview(ctx, &v); err == nil && ctx.Err() == nil {
+			return v, nil
+		}
+		select {
+		case <-ctx.Done():
+			return setupOverview{}, ctx.Err()
+		case <-retry.C:
+		}
+	}
+}
+
 func (u *setupUI) loadOverview() {
+	if u.overviewPending {
+		return
+	}
+	u.overviewPending = true
 	u.lastOverview = time.Now()
-	u.message = ""
-	var cpu CpuInfo
-	var network NetworkInfo
-	var emmc struct{ Devices []EmmcHealth }
-	err := u.api("profile", nil, &u.profile)
-	if err == nil {
-		err = u.api("cpu", nil, &cpu)
-	}
-	if err == nil {
-		err = u.api("network", nil, &network)
-	}
-	emmcErr := u.api("emmc", nil, &emmc)
-	u.fail(err)
+	var v setupOverview
+	u.async(func() error { return u.readOverview(u.ctx, &v) }, func(err error) {
+		u.overviewPending = false
+		if u.page != setupPageMain {
+			return
+		}
+		if err != nil {
+			u.fail(err)
+			return
+		}
+		u.message = ""
+		u.showOverview(v)
+	})
+}
+
+func (u *setupUI) showOverview(v setupOverview) {
+	u.profile = v.profile
+	cpu := v.cpu
 	board := u.profile.Board
 	if board == "" {
 		board = "RKdev"
@@ -361,12 +590,12 @@ func (u *setupUI) loadOverview() {
 		{"处理器", fmt.Sprintf("%s  /  %d 核  /  %s", cpu.Model, cpu.Cores, cpu.Temp), nil},
 		{"运行内存", formatBytes(cpu.MemTotal) + " · 可用 " + formatBytes(cpu.MemFree), nil},
 	}
-	if emmcErr != nil {
+	if v.emmcErr != nil {
 		rows = append(rows, setupRow{"eMMC 容量", "暂不可用", nil})
-	} else if len(emmc.Devices) == 0 {
+	} else if len(v.emmc.Devices) == 0 {
 		rows = append(rows, setupRow{"eMMC 容量", "未检测到 eMMC", nil})
 	}
-	for _, disk := range emmc.Devices {
+	for _, disk := range v.emmc.Devices {
 		detail := "容量未知"
 		if disk.Capacity > 0 {
 			detail = fmt.Sprintf("%.2f GiB", float64(disk.Capacity)/(1<<30))
@@ -374,11 +603,11 @@ func (u *setupUI) loadOverview() {
 		rows = append(rows, setupRow{"eMMC 容量", detail + " · " + disk.Device, nil})
 	}
 	rows = append(rows, setupRow{"恢复系统", "v" + buildTime + "  ·  Linux " + cpu.Kernel, nil})
-	if lan := setupAddress(runtimeIPv4("br0")); lan != "" {
-		rows = append(rows, setupRow{"LAN / Wi-Fi", "http://" + lan + "/", nil})
+	if v.lan != "" {
+		rows = append(rows, setupRow{"LAN / Wi-Fi", "http://" + v.lan + "/", nil})
 	}
-	for _, n := range network.Interfaces {
-		if n.Ip != "" && n.Ip != "-" && n.Name != "lo" {
+	for _, n := range v.network.Interfaces {
+		if n.Ip != "" && n.Ip != "-" && n.Name != "lo" && n.Name != "br0" {
 			addr, err := netip.ParseAddr(n.Ip)
 			detail := n.Ip
 			if err == nil && addr.Is4() {
@@ -392,40 +621,47 @@ func (u *setupUI) loadOverview() {
 	if u.profile.Message != "" && u.message == "" {
 		u.message = u.profile.Message
 	}
-	rows = append(rows, setupRow{"重新启动", "", func() {
-		u.confirm("重新启动设备", "恢复系统将重新启动。", func() {
-			u.fail(u.api("reboot", map[string]string{}, nil))
-		})
-	}})
-	u.define("查看机器信息与 Web 管理地址。", rows...)
+	u.define("", rows...)
 }
 
 func (u *setupUI) paint(p *setupPainter) {
-	p.box(0, 0, 1024, 576, 0x0e1422)
-	p.box(0, 0, 1024, 67, 0x192940)
-	p.box(0, 65, 1024, 2, 0x47b7e6)
-	p.box(0, 67, 220, 449, 0x141f31)
-	p.box(219, 66, 1, 449, 0x2c4059)
+	const navy, ink, muted = 0x152840, 0x172438, 0x455268
+	const panel, line, white = 0xeef0f3, 0xa4aebd, 0xffffff
+	p.box(0, 0, 1024, 576, 0xdadde4)
+	p.box(0, 0, 1024, 105, navy)
 	p.mark()
-	p.text(119, 11, 700, "RKdev  /  恢复设置", 0xeef8ff)
-	p.text(119, 36, 714, "Recovery Setup Utility", 0x8eabc9)
-	p.text(779, 23, 1000, "v"+buildTime, 0xb6d2e9)
+	p.text(119, 12, 690, "RKdev Setup Utility", white)
+	p.text(119, 36, 690, u.profile.Board, 0xb7c9df)
+	p.text(794, 24, 1002, "v"+buildTime, 0xb7c9df)
+	changes := u.changes()
 	for i, title := range setupPages {
-		y := 90 + i*49
+		x := 22 + i*123
+		fg := uint32(0xc8d8ec)
+		p.box(x, 68, 119, 35, 0x223c5a)
 		if i == u.page {
-			p.box(15, y, 190, 39, 0x254264)
-			p.box(15, y, 3, 39, 0x53d7ff)
+			p.box(x, 68, 119, 37, panel)
+			p.box(x, 68, 119, 3, 0xf0cd79)
+			fg = ink
 		}
-		p.text(26, y+8, 52, fmt.Sprintf("%02d", i+1), 0x6ab9e1)
-		p.text(58, y+8, 204, title, 0xe1edfa)
+		p.text(x+14, 75, x+105, title, fg)
+		if (i == setupPageBoot && u.boot.changed()) ||
+			(i == setupPageNetwork && (u.network.changed() || u.firewall.changed())) ||
+			(i == setupPageSSH && u.sshChanged()) {
+			p.text(x+98, 75, x+116, "*", fg)
+		}
 	}
-	p.text(243, 81, 1000, setupPages[u.page]+func() string {
-		if u.group == "" {
-			return ""
+	p.box(22, 105, 980, 379, panel)
+	p.box(722, 117, 1, 355, line)
+	p.box(35, 148, 672, 1, line)
+	title := setupPages[u.page]
+	if u.group != "" {
+		group := u.group
+		if group == "fw-add" {
+			group = "防火墙 / 添加规则"
 		}
-		return "  /  " + u.group
-	}(), 0x73d8fe)
-	p.text(243, 113, 1000, u.hint, 0x9bb4cc)
+		title += "  /  " + group
+	}
+	p.text(39, 119, 705, title, ink)
 	const visible = 9
 	if u.selected-u.scrolled >= visible {
 		u.scrolled = u.selected - visible + 1
@@ -434,50 +670,90 @@ func (u *setupUI) paint(p *setupPainter) {
 		u.scrolled = u.selected
 	}
 	for i := u.scrolled; i < len(u.rows) && i < u.scrolled+visible; i++ {
-		y := 146 + 34*(i-u.scrolled)
-		bg, fg := uint32(0x162238), uint32(0xc3d9ed)
+		y := 155 + 34*(i-u.scrolled)
+		bg, fg, value := uint32(panel), uint32(ink), uint32(muted)
 		if i%2 == 1 {
-			bg = 0x19273c
+			bg = 0xe4e8ef
 		}
 		if i == u.selected {
-			bg, fg = 0x185281, 0xffffff
+			bg, fg, value = 0x23517e, white, 0xe7f2ff
 		}
-		p.box(241, y, 760, 32, bg)
+		p.box(34, y, 674, 32, bg)
 		row := u.rows[i]
-		if row.detail == "" {
-			p.text(251, y+4, 990, row.label, fg)
-		} else {
-			p.text(251, y+4, 462, row.label, fg)
-			p.text(471, y+4, 990, row.detail, fg)
-		}
 		if row.run != nil {
-			p.text(976, y+4, 998, "→", 0x8ad4f9)
+			p.text(42, y+4, 62, ">", fg)
 		}
+		limit := 699
+		if row.detail != "" {
+			limit = 300
+		}
+		p.text(66, y+4, limit, row.label, fg)
+		p.text(314, y+4, 699, row.detail, value)
 	}
-	p.text(244, 461, 1000, u.message, 0xf1c380)
 	if len(u.rows) > visible {
-		p.text(927, 491, 1000, fmt.Sprintf("%d/%d", u.selected+1, len(u.rows)), 0x90aecb)
+		p.text(643, 459, 705, fmt.Sprintf("%d/%d", u.selected+1, len(u.rows)), muted)
 	}
-	p.box(0, 516, 1024, 60, 0x192940)
-	p.box(0, 516, 1024, 1, 0x385974)
-	p.text(24, 532, 1000, "← →  菜单    ↑ ↓  选择    Enter  打开 / 编辑    Esc  返回    F5  刷新", 0xd7e9fa)
-	if d := u.dialog; d != nil {
-		p.box(206, 175, 612, 228, 0x061320)
-		p.box(210, 179, 604, 220, 0x223b57)
-		p.text(234, 197, 794, d.title, 0xa0e7ff)
-		p.text(234, 234, 794, d.body, 0xe4eef9)
-		if d.input {
-			p.box(233, 271, 556, 33, 0x111d2e)
-			value := d.value
-			if d.secret {
-				value = strings.Repeat("*", utf8.RuneCountInString(value))
-			}
-			r := []rune(value)
-			if len(r) > 27 {
-				value = "…" + string(r[len(r)-27:])
-			}
-			p.text(241, 274, 785, value+"_", 0xf4fbff)
+	p.text(743, 119, 987, "设置状态", ink)
+	p.box(740, 148, 245, 1, line)
+	if len(changes) == 0 {
+		p.text(743, 163, 987, "没有未保存的更改", muted)
+	} else {
+		p.text(743, 163, 987, "未保存的更改", 0x8a4a04)
+		for i, name := range changes {
+			p.text(744, 193+27*i, 987, "*  "+name, ink)
 		}
-		p.text(234, 335, 794, "Enter  确认                         Esc  取消", 0xd4eafb)
+	}
+	p.wrap(743, 321, 985, 5, u.hint, muted)
+	p.wrap(31, 486, 996, 2, u.message, 0x773b00)
+	p.box(0, 538, 1024, 38, navy)
+	if u.save != nil {
+		p.text(24, 545, 1002, "↑ ↓ 选择     Enter 执行     Esc 回退", 0xd9e8fa)
+	} else {
+		p.text(24, 545, 1002, "← → 菜单     ↑ ↓ 选择     Enter 编辑     Esc 返回     F5 刷新", 0xd9e8fa)
+		if u.page == setupPageBoot && u.group == "" {
+			p.text(696, 545, 840, "+ / -  优先级", 0xd9e8fa)
+		}
+		p.text(851, 545, 1002, "F10 保存并退出", 0xffdf92)
+	}
+	if d := u.dialog; d != nil {
+		height := 177
+		if len(d.options) > 0 {
+			height = 86 + 33*min(8, len(d.options))
+		}
+		y := (576 - height) / 2
+		p.box(210, y+4, 614, height, 0x848f9f)
+		p.box(205, y, 614, height, navy)
+		p.box(207, y+36, 610, height-38, panel)
+		p.text(223, y+7, 797, d.title, white)
+		p.wrap(223, y+48, 797, 3, d.body, ink)
+		if len(d.options) > 0 {
+			start := max(0, d.selected-7)
+			for i := start; i < min(len(d.options), start+8); i++ {
+				rowY := y + 43 + 33*(i-start)
+				fg := uint32(ink)
+				if i == d.selected {
+					p.box(223, rowY, 576, 31, 0x23517e)
+					fg = white
+				}
+				p.text(237, rowY+4, 783, d.options[i].label, fg)
+			}
+		}
+		if d.input {
+			p.box(222, y+64, 577, 37, white)
+			left, right := d.value[:d.cursor], d.value[d.cursor:]
+			if d.secret {
+				left = strings.Repeat("*", utf8.RuneCountInString(left))
+				right = strings.Repeat("*", utf8.RuneCountInString(right))
+			}
+			width := p.width(left)
+			for width > 510 {
+				_, n := utf8.DecodeRuneInString(left)
+				width -= p.width(left[:n])
+				left = left[n:]
+			}
+			p.text(233, y+70, 791, left+right, ink)
+			p.box(233+width, y+72, 2, 22, 0x23517e)
+		}
+		p.text(223, y+height-33, 797, "Enter 确认             Esc 取消", muted)
 	}
 }
