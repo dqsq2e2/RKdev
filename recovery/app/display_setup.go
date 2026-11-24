@@ -590,7 +590,8 @@ func (u *setupUI) showOverview(v setupOverview) {
 	}
 	rows := []setupRow{
 		{"本机", board + "  ·  " + strings.ToUpper(u.profile.Profile), nil},
-		{"处理器", fmt.Sprintf("%s  /  %d 核  /  %s", cpu.Model, cpu.Cores, cpu.Temp), nil},
+		{"处理器", fmt.Sprintf("%s  /  %d 核", cpu.Model, cpu.Cores), nil},
+		{"处理器温度", cpu.Temp, nil},
 		{"运行内存", formatBytes(cpu.MemTotal) + " · 可用 " + formatBytes(cpu.MemFree), nil},
 	}
 	if v.emmcErr != nil {

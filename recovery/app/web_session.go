@@ -148,7 +148,7 @@ func (s *managementController) serveSession(w http.ResponseWriter, r *http.Reque
 		webCookie(w, "")
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
-	case "/res/logo.png":
+	case "/res/logo.png", "/res/boot-mark.png":
 		if read {
 			next.ServeHTTP(w, r)
 			return

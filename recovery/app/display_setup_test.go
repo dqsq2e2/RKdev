@@ -95,6 +95,29 @@ func TestSetupWaitsForOverview(t *testing.T) {
 	}
 }
 
+func TestSetupOverviewShowsProcessorTemperatureInItsOwnRow(t *testing.T) {
+	u := setupTestUI(t)
+	u.showOverview(setupOverview{
+		profile: setupProfile{Board: "Test board", Profile: "emmc"},
+		cpu:     CpuInfo{Model: "ARMv8 Processor", Cores: 8, Temp: "45.3°C"},
+	})
+	var processor, temperature string
+	for _, row := range u.rows {
+		switch row.label {
+		case "处理器":
+			processor = row.detail
+		case "处理器温度":
+			temperature = row.detail
+		}
+	}
+	if processor != "ARMv8 Processor  /  8 核" {
+		t.Fatalf("processor row includes unrelated data: %q", processor)
+	}
+	if temperature != "45.3°C" {
+		t.Fatalf("processor temperature is incomplete: %q", temperature)
+	}
+}
+
 func TestSetupNetworkSlowPollStillAllowsKeys(t *testing.T) {
 	u := setupTestUI(t)
 	started, release := make(chan struct{}), make(chan struct{})

@@ -43,6 +43,7 @@ func TestRecoveryWeb(t *testing.T) {
 		{"HTTPS entry requires login", "/?view=terminal", "", "GET", "192.168.88.100:1234", "192.168.88.1", "https", false, 303, "/login?view=terminal"},
 		{"public login", "/login", "", "GET", "192.168.88.100:1234", "192.168.88.1", "https", false, 200, ""},
 		{"public logo", "/res/logo.png", "", "GET", "192.168.88.100:1234", "192.168.88.1", "https", false, 204, ""},
+		{"public boot logo", "/res/boot-mark.png", "", "GET", "192.168.88.100:1234", "192.168.88.1", "https", false, 204, ""},
 		{"anonymous upload", "/upload", "", "POST", "192.168.88.100:1234", "192.168.88.1", "https", false, 401, ""},
 		{"anonymous disk backup", "/api/backup/stream", "", "GET", "192.168.88.100:1234", "192.168.88.1", "https", false, 401, ""},
 		{"anonymous log stream", "/api/logs", "", "GET", "192.168.88.100:1234", "192.168.88.1", "https", false, 401, ""},
@@ -108,7 +109,7 @@ func TestWebTemplate(t *testing.T) {
 			t.Fatal(err)
 		}
 		html := output.String()
-		for _, marker := range []string{"Example Board", "vtest", "flash-panel", "boot-panel", "storage-panel", "update-panel", "backup-panel", "firewall-panel", "terminal-panel", "management-panel", ".boot-type-sata .boot-type-badge", "recovery-manifest", "/api/update_check", "/api/update_download", "/api/update_cancel"} {
+		for _, marker := range []string{"Example Board", "vtest", `<link rel="icon" type="image/png" href="/res/boot-mark.png">`, "flash-panel", "boot-panel", "storage-panel", "update-panel", "backup-panel", "firewall-panel", "terminal-panel", "management-panel", ".boot-type-sata .boot-type-badge", "recovery-manifest", "/api/update_check", "/api/update_download", "/api/update_cancel"} {
 			if !strings.Contains(html, marker) {
 				t.Errorf("%s missing %s", profile, marker)
 			}
@@ -116,6 +117,18 @@ func TestWebTemplate(t *testing.T) {
 		if strings.Contains(html, "PHX-R3588") || strings.Contains(html, "iflytek_rk3588_aiui") ||
 			strings.Contains(html, "eMMC 系统空间</strong>") != (profile == "emmc") {
 			t.Errorf("incorrect %s profile rendering", profile)
+		}
+	}
+}
+
+func TestLoginTemplateUsesBootLogoFavicon(t *testing.T) {
+	var output strings.Builder
+	if err := loginPage.Execute(&output, map[string]any{"Action": "/login", "Message": "", "Error": false}); err != nil {
+		t.Fatal(err)
+	}
+	for _, marker := range []string{`<link rel="icon" type="image/png" href="/res/boot-mark.png">`, `<img src="/res/boot-mark.png" alt="">`} {
+		if !strings.Contains(output.String(), marker) {
+			t.Fatalf("login page does not use the RKdev boot logo: %s", marker)
 		}
 	}
 }

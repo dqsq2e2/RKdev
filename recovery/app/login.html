@@ -3,6 +3,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="icon" type="image/png" href="/res/boot-mark.png">
     <title>登录 · RKdev</title>
     <style>
         :root { color-scheme: light dark; --bg: #f1f4f8; --panel: #fff; --ink: #202832;
@@ -33,7 +34,7 @@
 </head>
 <body>
     <main aria-labelledby="login-title">
-        <header><img src="/res/logo.png" alt=""><h1>RKdev</h1></header>
+        <header><img src="/res/boot-mark.png" alt=""><h1>RKdev</h1></header>
         <h2 id="login-title">登录恢复系统</h2>
         <form method="post" action="{{.Action}}">
             <label>恢复账号<input name="username" autocomplete="username" maxlength="32" required autofocus></label>

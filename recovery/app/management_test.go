@@ -77,6 +77,13 @@ func TestManagementRollsBackFailedStoreWrite(t *testing.T) {
 }
 
 func TestManagementTransportAndSecrets(t *testing.T) {
+	settingsJS, err := resFS.ReadFile("res/settings.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(settingsJS), "current_password") || strings.Contains(string(settingsJS), "当前密码") {
+		t.Fatal("web management still asks for the current password")
+	}
 	s := testManagement(t)
 	token, err := s.sessions.issue("root")
 	if err != nil {
@@ -87,15 +94,16 @@ func TestManagementTransportAndSecrets(t *testing.T) {
 	handler := recoveryWeb(s, http.HandlerFunc(s.handle))
 	for _, tc := range []struct {
 		method, scheme, origin, body string
-		local                        bool
+		local, authenticated         bool
 		want                         int
 	}{
-		{"GET", "https", "", "", false, 200},
-		{"POST", "http", "http://192.168.88.1", `{"account":{"username":"operator"}}`, false, 403},
-		{"POST", "https", "http://192.168.88.1", `{"account":{"username":"operator"}}`, false, 403},
-		{"POST", "https", "https://192.168.88.1", `{"account":{"username":"operator"}}`, false, 401},
-		{"POST", "http", "", `{"account":{"username":"operator"}}`, true, 200},
-		{"GET", "https", "", "", false, 401},
+		{"GET", "https", "", "", false, true, 200},
+		{"POST", "http", "http://192.168.88.1", `{"account":{"username":"operator"}}`, false, true, 403},
+		{"POST", "https", "http://192.168.88.1", `{"account":{"username":"operator"}}`, false, true, 403},
+		{"POST", "https", "https://192.168.88.1", `{"account":{"username":"operator"}}`, false, false, 401},
+		{"POST", "https", "https://192.168.88.1", `{"account":{"username":"operator"}}`, false, true, 200},
+		{"GET", "https", "", "", false, true, 401},
+		{"POST", "http", "", `{"account":{"username":"operator"}}`, true, false, 200},
 	} {
 		var addr net.Addr = &net.TCPAddr{IP: net.ParseIP("192.168.88.1"), Port: 443}
 		if tc.local {
@@ -105,7 +113,9 @@ func TestManagementTransportAndSecrets(t *testing.T) {
 		r := httptest.NewRequestWithContext(ctx, tc.method, tc.scheme+"://192.168.88.1/api/management", strings.NewReader(tc.body))
 		r.RemoteAddr = "192.168.88.100:1234"
 		r.Header.Set("Origin", tc.origin)
-		r.AddCookie(&http.Cookie{Name: webSessionCookie, Value: token})
+		if tc.authenticated {
+			r.AddCookie(&http.Cookie{Name: webSessionCookie, Value: token})
+		}
 		w := httptest.NewRecorder()
 		if tc.local {
 			s.handle(w, r)
@@ -117,6 +127,11 @@ func TestManagementTransportAndSecrets(t *testing.T) {
 		}
 		if strings.Contains(w.Body.String(), testAccountHash) {
 			t.Error("web response exposed a password hash")
+		}
+		if tc.method == http.MethodPost && tc.scheme == "https" && tc.want == 200 && !tc.local {
+			if !strings.Contains(w.Body.String(), `"login_required":true`) {
+				t.Error("account update did not require a fresh login")
+			}
 		}
 	}
 	if session.ctx.Err() == nil {

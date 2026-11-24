@@ -269,7 +269,6 @@
         };
         const username = input(state.username, 'text');
         const password = secret('new-password'), confirm = secret('new-password');
-        const current = secret('current-password');
         username.autocomplete = 'off';
         username.maxLength = 32;
         username.spellcheck = false;
@@ -309,10 +308,8 @@
         const sshChanged = () => c && (c.enabled !== state.ssh.enabled || c.port !== state.ssh.port ||
             c.password !== state.ssh.password || c.keys !== state.ssh.keys);
         let saving = false;
-        const hasEdits = () => saving || !!(accountChanged() || sshChanged() || confirm.value || current.value);
+        const hasEdits = () => saving || !!(accountChanged() || sshChanged() || confirm.value);
         managementDraft = {hasEdits};
-        current.required = true;
-        section('确认身份').append(field('当前密码', current));
         const actions = tag('div', '', 'settings-actions');
         const save = tag('button', '保存并应用', 'btn-boot-save');
         save.type = 'submit';
@@ -333,7 +330,7 @@
                 confirm.focus();
                 return;
             }
-            const edit = {current_password: current.value};
+            const edit = {};
             if (accountChanged()) edit.account = {username: username.value.trim(), password: password.value};
             if (sshChanged()) edit.ssh = c;
             saving = true;
@@ -344,7 +341,6 @@
                 else renderManagement(state);
             }
             catch (e) {
-                current.value = '';
                 message(msg, e.message, true);
             } finally {
                 saving = false;

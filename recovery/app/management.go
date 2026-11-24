@@ -19,9 +19,8 @@ type managementState struct {
 }
 
 type managementEdit struct {
-	SSH             *sshConfig   `json:"ssh,omitempty"`
-	Account         *accountEdit `json:"account,omitempty"`
-	CurrentPassword string       `json:"current_password,omitempty"`
+	SSH     *sshConfig   `json:"ssh,omitempty"`
+	Account *accountEdit `json:"account,omitempty"`
 }
 
 func startSettingsControls(n *netController) {
@@ -200,10 +199,6 @@ func (s *managementController) handle(w http.ResponseWriter, r *http.Request) {
 		if session := requestWebSession(r); session == nil || session.ctx.Err() != nil {
 			w.Header().Set("X-RKdev-Login", "required")
 			jsonErr(w, http.StatusUnauthorized, "请先登录恢复系统")
-			return
-		}
-		if !s.account.authenticates(edit.CurrentPassword) {
-			jsonErr(w, 401, "当前恢复账户密码不正确")
 			return
 		}
 	}
