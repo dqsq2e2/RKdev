@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/netip"
 	"os"
@@ -22,14 +23,14 @@ const (
 	setupPageMain = iota
 	setupPageBoot
 	setupPageNetwork
-	setupPageSSH
+	setupPageManagement
 	setupPageFlash
 	setupPageUpdate
 	setupPageTerminal
 	setupPageExit
 )
 
-var setupPages = [...]string{"概览", "引导", "网络", "SSH", "刷写", "更新", "终端", "退出"}
+var setupPages = [...]string{"概览", "引导", "网络", "管理", "刷写", "更新", "终端", "退出"}
 
 type setupRow struct {
 	label, detail string
@@ -90,10 +91,7 @@ type setupUI struct {
 	network                  setupNetworkModel
 	firewall                 setupFirewallModel
 	firewallIO               setupSettingIO
-	sshIO                    setupSettingIO
-	ssh                      setupSSHModel
-	sshDraft                 sshConfig
-	sshLoaded                bool
+	management               setupManagementModel
 	profile                  setupProfile
 	save                     *setupSave
 	rebooting                bool
@@ -101,7 +99,12 @@ type setupUI struct {
 
 func newSetupUI(ctx context.Context, tty *setupTTY) *setupUI {
 	return &setupUI{ctx: ctx, tty: tty, completed: make(chan func()), client: &http.Client{
-		Transport:     &http.Transport{DisableCompression: true, MaxIdleConns: 2, IdleConnTimeout: 10 * time.Second},
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "unix", setupSocket)
+			},
+			DisableCompression: true, MaxIdleConns: 2, IdleConnTimeout: 10 * time.Second,
+		},
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}}
 }
@@ -111,7 +114,7 @@ func (u *setupUI) api(path string, req, dst any) error {
 }
 
 func (u *setupUI) call(ctx context.Context, path string, req, dst any) error {
-	url := "http://127.0.0.1/api/" + path
+	url := "http://localhost/api/" + path
 	method := http.MethodGet
 	var data []byte
 	budget := 3500 * time.Millisecond
@@ -472,8 +475,8 @@ func (u *setupUI) refresh() {
 		u.loadMediaPage()
 	case setupPageNetwork:
 		u.loadNetworkPage()
-	case setupPageSSH:
-		u.loadSSH()
+	case setupPageManagement:
+		u.loadManagement()
 	case setupPageTerminal:
 		u.define("", setupRow{"进入本地终端", "", u.terminal})
 	case setupPageExit:
@@ -604,16 +607,16 @@ func (u *setupUI) showOverview(v setupOverview) {
 	}
 	rows = append(rows, setupRow{"恢复系统", "v" + buildTime + "  ·  Linux " + cpu.Kernel, nil})
 	if v.lan != "" {
-		rows = append(rows, setupRow{"LAN / Wi-Fi", "http://" + v.lan + "/", nil})
+		rows = append(rows, setupRow{"LAN / Wi-Fi", "https://" + v.lan + "/", nil})
 	}
 	for _, n := range v.network.Interfaces {
 		if n.Ip != "" && n.Ip != "-" && n.Name != "lo" && n.Name != "br0" {
 			addr, err := netip.ParseAddr(n.Ip)
 			detail := n.Ip
 			if err == nil && addr.Is4() {
-				detail = "http://" + addr.String() + "/"
+				detail = "https://" + addr.String() + "/"
 			} else if err == nil && addr.Is6() && !addr.IsLinkLocalUnicast() {
-				detail = "http://[" + addr.String() + "]/"
+				detail = "https://[" + addr.String() + "]/"
 			}
 			rows = append(rows, setupRow{"网络 · " + n.Name, detail, nil})
 		}
@@ -646,7 +649,7 @@ func (u *setupUI) paint(p *setupPainter) {
 		p.text(x+14, 75, x+105, title, fg)
 		if (i == setupPageBoot && u.boot.changed()) ||
 			(i == setupPageNetwork && (u.network.changed() || u.firewall.changed())) ||
-			(i == setupPageSSH && u.sshChanged()) {
+			(i == setupPageManagement && u.management.changed()) {
 			p.text(x+98, 75, x+116, "*", fg)
 		}
 	}

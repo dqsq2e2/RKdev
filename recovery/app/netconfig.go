@@ -317,7 +317,7 @@ func (n *netController) startTrial(c networkConfig, now time.Time) (networkTrial
 		return networkTrial{}, err
 	}
 	ip, _ := netip.ParsePrefix(c.LAN.Address)
-	t := &networkTrial{ID: fmt.Sprintf("%x", id), Status: "applying", LANURL: "http://" + ip.Addr().String() + "/",
+	t := &networkTrial{ID: fmt.Sprintf("%x", id), Status: "applying", LANURL: "https://" + ip.Addr().String() + "/?view=network",
 		Deadline: now.Add(networkTrialTime), config: c}
 	n.trial = t
 	snapshot := *t

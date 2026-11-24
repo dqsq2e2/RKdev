@@ -501,7 +501,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		tmpl.Execute(w, map[string]string{"BuildTime": buildTime, "BoardName": currentLayout.Name, "Profile": currentLayout.Profile})
 	})
 	http.HandleFunc("/api/devices", func(w http.ResponseWriter, r *http.Request) {
@@ -542,12 +542,16 @@ func main() {
 	http.HandleFunc("/api/firewall/delete", handleFirewallChange("delete"))
 	http.HandleFunc("/api/firewall/toggle", handleFirewallChange("toggle"))
 	http.HandleFunc("/api/firewall/trial", handleFirewallChange("trial"))
-	http.HandleFunc("/api/ssh/config", handleSSHConfig)
+	http.HandleFunc("/api/management", management.handle)
 	http.HandleFunc("/api/setup/boot", setupLocal(handleSetupBoot))
 	http.HandleFunc("/api/setup/firewall", setupLocal(handleSetupFirewall))
 	http.HandleFunc("/api/setup/network_defaults", setupLocal(handleSetupNetworkDefaults))
 
 	http.HandleFunc("/api/terminal", func(w http.ResponseWriter, r *http.Request) {
+		if session := requestWebSession(r); session == nil || session.ctx.Err() != nil {
+			jsonErr(w, http.StatusUnauthorized, "请先登录恢复系统")
+			return
+		}
 		if err := currentLayout.checkMedium(false); err != nil {
 			jsonErr(w, http.StatusConflict, err.Error())
 			return
@@ -604,23 +608,34 @@ func generateSelfSignedCert() (tls.Certificate, error) {
 
 func handleTerminal(ws *websocket.Conn) {
 	defer ws.Close()
-	log.Printf("[TERM] Session started from %s", ws.Request().RemoteAddr)
-
-	shell := os.Getenv("SHELL")
-	if shell == "" {
-		shell = "/bin/sh"
+	session := requestWebSession(ws.Request())
+	if session == nil || session.ctx.Err() != nil {
+		return
 	}
+	ws.MaxPayloadBytes = 64 << 10
 
-	cmd := exec.Command(shell)
+	// The HTTPS session has already authenticated this account. BusyBox
+	// securetty is still used for password login at a physical console.
+	cmd := exec.Command("/bin/login", "-f", session.username)
 	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
 
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
 		log.Printf("[TERM] PTY start failed: %v", err)
-		ws.Write([]byte("\r\n*** Failed to start terminal: " + err.Error() + " ***\r\n"))
+		_ = websocket.JSON.Send(ws, map[string]string{"error": "无法打开恢复终端"})
 		return
 	}
 	defer ptmx.Close()
+	defer func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	}()
+	_ = ws.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	if err := websocket.JSON.Send(ws, map[string]bool{"ready": true}); err != nil {
+		return
+	}
+	_ = ws.SetWriteDeadline(time.Time{})
+	log.Printf("[TERM] Session started from %s", ws.Request().RemoteAddr)
 
 	pty.Setsize(ptmx, &pty.Winsize{Rows: 30, Cols: 120})
 
@@ -632,6 +647,9 @@ func handleTerminal(ws *websocket.Conn) {
 		for {
 			n, err := ws.Read(buf)
 			if err != nil {
+				return
+			}
+			if session.ctx.Err() != nil {
 				return
 			}
 			if n > 0 && buf[0] == '0' {
@@ -658,9 +676,11 @@ func handleTerminal(ws *websocket.Conn) {
 		}
 	}()
 
-	<-done
-	cmd.Process.Kill()
-	cmd.Wait()
+	select {
+	case <-done:
+	case <-session.ctx.Done():
+	}
+	_ = ws.SetDeadline(time.Now().Add(time.Second))
 	log.Println("[TERM] Session ended")
 }
 
@@ -1805,7 +1825,9 @@ func handleProgress(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "streaming unsupported", 500)
 		return
 	}
-	for {
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	for r.Context().Err() == nil {
 		task := getTask(taskID)
 		if task == nil {
 			fmt.Fprintf(w, "data: {\"status\":\"error\",\"error\":\"task not found\"}\n\n")
@@ -1818,7 +1840,11 @@ func handleProgress(w http.ResponseWriter, r *http.Request) {
 		if task.Status == "done" || task.Status == "error" {
 			return
 		}
-		time.Sleep(200 * time.Millisecond)
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+		}
 	}
 }
 
@@ -2890,7 +2916,9 @@ func handleBackupProgress(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 
 	flusher, _ := w.(http.Flusher)
-	for {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for r.Context().Err() == nil {
 		backupProgress.mu.Lock()
 		data := map[string]interface{}{
 			"phase":   backupProgress.Phase,
@@ -2916,7 +2944,11 @@ func handleBackupProgress(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 
-		time.Sleep(500 * time.Millisecond)
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+		}
 	}
 }
 

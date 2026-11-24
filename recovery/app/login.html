@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>登录 · RKdev</title>
+    <style>
+        :root { color-scheme: light dark; --bg: #f1f4f8; --panel: #fff; --ink: #202832;
+            --subtle: #536170; --line: #c4ccd7; --accent: #1963ab; --error: #a62939; }
+        @media (prefers-color-scheme: dark) {
+            :root { --bg: #171a1c; --panel: #202429; --ink: #eef3f8; --subtle: #aab6c4;
+                --line: #525d68; --accent: #83bdf4; --error: #ff9ca7; }
+        }
+        * { box-sizing: border-box; }
+        body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 20px;
+            background: var(--bg); color: var(--ink); font: 15px/1.5 system-ui, sans-serif; }
+        main { width: min(100%, 376px); padding: 26px; background: var(--panel);
+            border: 1px solid var(--line); border-radius: 8px; }
+        header { display: flex; align-items: center; gap: 12px; }
+        header img { width: 48px; height: 40px; object-fit: contain; }
+        h1 { margin: 0; font-size: 22px; }
+        h2 { margin: 18px 0 12px; font-size: 16px; font-weight: 600; }
+        form { display: grid; gap: 13px; }
+        label { display: grid; gap: 5px; color: var(--subtle); }
+        input, button { width: 100%; min-width: 0; min-height: 42px; font: inherit; border-radius: 5px; }
+        input { padding: 8px 10px; color: var(--ink); background: var(--panel); border: 1px solid var(--line); }
+        button { border: 1px solid var(--accent); color: var(--panel); background: var(--accent);
+            font-weight: 600; cursor: pointer; }
+        :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+        p { margin: 0; color: var(--subtle); }
+        .error { color: var(--error); }
+    </style>
+</head>
+<body>
+    <main aria-labelledby="login-title">
+        <header><img src="/res/logo.png" alt=""><h1>RKdev</h1></header>
+        <h2 id="login-title">登录恢复系统</h2>
+        <form method="post" action="{{.Action}}">
+            <label>恢复账号<input name="username" autocomplete="username" maxlength="32" required autofocus></label>
+            <label>密码<input name="password" type="password" autocomplete="current-password" maxlength="128" required></label>
+            {{if .Message}}<p class="{{if .Error}}error{{end}}" role="status">{{.Message}}</p>{{end}}
+            <button type="submit">登录</button>
+        </form>
+    </main>
+</body>
+</html>

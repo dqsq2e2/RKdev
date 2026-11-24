@@ -95,6 +95,7 @@
         .nav-brand:hover .nav-brand-logo { opacity: 1; visibility: visible; }
         .nav-brand-logo img { width: 150px; height: 150px; border-radius: 16px; object-fit: cover; box-shadow: 0 6px 20px rgba(0,0,0,.25); }
         .nav-actions { display: flex; align-items: center; gap: 8px; }
+        .nav-logout { font-family: inherit; }
         .nav-reboot { padding: 6px 14px; color: var(--danger); border: 1px solid var(--danger); border-radius: 6px; font-size: 13px; font-weight: bold; cursor: pointer; transition: all .2s; background: transparent; white-space: nowrap; }
         .nav-reboot:hover { background: var(--danger); color: #fff; }
         .nav-reboot.disabled { opacity: .5; pointer-events: none; }
@@ -630,6 +631,7 @@
             <div class="nav-theme" id="nav-theme-btn" onclick="toggleTheme()">🌙 暗色</div>
             <div class="nav-about" onclick="showAbout()">ℹ️ 关于</div>
             <div class="nav-reboot" id="nav-reboot-btn" onclick="triggerReboot(event)">🔄 重启系统</div>
+            <form method="post" action="/logout"><button class="nav-about nav-logout" type="submit">退出登录</button></form>
         </div>
     </div>
     <div class="nav-tabbar">
@@ -639,7 +641,7 @@
         <div class="nav-tab" data-panel="update-panel" onclick="switchTab(this)">📦 更新助手</div>
         <div class="nav-tab" data-panel="backup-panel" onclick="switchTab(this)">💿 备份还原</div>
         <div class="nav-tab" data-panel="firewall-panel" onclick="switchTab(this)">🌐 网络配置</div>
-        <div class="nav-tab" data-panel="ssh-panel" onclick="switchTab(this)">🔑 SSH</div>
+        <div class="nav-tab" data-panel="management-panel" onclick="switchTab(this)">🔑 管理</div>
         <div class="nav-tab" data-panel="terminal-panel" onclick="switchTab(this)">💻 终端</div>
     </div>
 </div>
@@ -745,6 +747,7 @@
 </div>
 
 <div id="terminal-panel" class="panel">
+    <p id="terminal-status" class="settings-message" role="status" hidden></p>
     <div class="terminal-toolbar">
         <div class="term-title">
             <span class="term-dot" id="term-status-dot"></span>
@@ -1019,10 +1022,10 @@
     </div>
 </div>
 
-<div id="ssh-panel" class="panel">
+<div id="management-panel" class="panel">
     <div class="fw-card">
-        <h1>SSH 配置</h1>
-        <div id="ssh-settings"></div>
+        <h1>管理</h1>
+        <div id="management-settings"></div>
     </div>
 </div>
 
@@ -1117,22 +1120,35 @@
         document.getElementById(el.dataset.panel).classList.add('active');
         if (el.dataset.panel === 'storage-panel') loadHardwareAll();
         if (el.dataset.panel === 'firewall-panel') window.rkSettings?.openNetwork();
-        if (el.dataset.panel === 'ssh-panel') window.rkSettings?.openSSH();
+        if (el.dataset.panel === 'management-panel') window.rkSettings?.openManagement();
 
         if (el.dataset.panel === 'terminal-panel') {
-            if (!termInitialized) {
-                initTerminal();                       // 首次：完整初始化
-            } else {
-                // 非首次：重算尺寸 + 断了就重连
-                setTimeout(() => {
-                    if (termFitAddon) termFitAddon.fit();
-                    sendResize();
-                }, 50);
-                if (!termWs || termWs.readyState !== WebSocket.OPEN) {
-                    reconnectTerminal();
-                }
-            }
+            if (!termInitialized) initTerminal();
+            if (!termWs) connectTerminal();
+            setTimeout(() => {
+                termFitAddon.fit();
+                sendResize();
+            }, 50);
         }
+    }
+
+    const recoveryViews = {
+        boot: 'boot-panel', storage: 'storage-panel', update: 'update-panel',
+        backup: 'backup-panel', network: 'firewall-panel', management: 'management-panel',
+        terminal: 'terminal-panel'
+    };
+
+    function recoveryLoginRequired(r) {
+        return r.status === 401 && r.headers.get('X-RKdev-Login') === 'required';
+    }
+
+    function reopenLogin(changed = false) {
+        const panel = document.querySelector('.nav-tab.active')?.dataset.panel;
+        const view = changed ? 'management' : Object.keys(recoveryViews).find(key => recoveryViews[key] === panel);
+        const query = new URLSearchParams();
+        if (view) query.set('view', view);
+        if (changed) query.set('changed', '1');
+        location.replace('/login' + (query.size ? '?' + query : ''));
     }
 
     // ==================== Firmware Download List ====================
@@ -1404,21 +1420,20 @@
         // ✅ 输入监听只绑定一次（避免重连时重复叠加）
         termInstance.onData((data) => {
             if (termWs && termWs.readyState === WebSocket.OPEN) {
-                const buf = new Uint8Array(data.length + 1);
+                const encoded = new TextEncoder().encode(data);
+                const buf = new Uint8Array(encoded.length + 1);
                 buf[0] = 0x30; // '0' = data frame
-                new TextEncoder().encodeInto(data, buf.subarray(1));
+                buf.set(encoded, 1);
                 termWs.send(buf);
             }
         });
 
-        // ✅ 点击终端区域 → 已断开则重连（让 "Click terminal to reconnect" 真正生效）
+        // Click a disconnected terminal to reconnect.
         container.addEventListener('click', () => {
-            if (!termWs || termWs.readyState !== WebSocket.OPEN) {
+            if (!termWs) {
                 reconnectTerminal();
             }
         });
-
-        connectTerminal();
 
         window.addEventListener('resize', () => {
             if (termFitAddon && document.getElementById('terminal-panel').classList.contains('active')) {
@@ -1443,7 +1458,6 @@
         setTimeout(() => reconnectTerminal(), 150);
     }
 
-    // ✅ 安全重连
     function reconnectTerminal() {
         if (termWs) {
             try {
@@ -1458,34 +1472,52 @@
         connectTerminal();
     }
 
+    function terminalStatus(message) {
+        const status = document.getElementById('terminal-status');
+        status.hidden = !message;
+        status.textContent = message;
+    }
+
     function connectTerminal() {
-        // ✅ 防御：已有可用/正在建立的连接就不重复创建
-        if (termWs && (termWs.readyState === WebSocket.OPEN || termWs.readyState === WebSocket.CONNECTING)) {
-            return;
-        }
-        const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-        termWs = new WebSocket(`${proto}//${location.host}/api/terminal`);
-        termWs.binaryType = 'arraybuffer';
+        if (termWs) return;
+        terminalStatus('正在连接终端…');
+        updateTermStatus(false);
+        const socket = new WebSocket(`wss://${location.host}/api/terminal`);
+        termWs = socket;
+        socket.binaryType = 'arraybuffer';
+        let first = true, cause = '终端连接已断开';
 
-        termWs.onopen = () => {
-            termInstance.writeln('\x1b[32m✔ Connected to remote shell\x1b[0m\r\n');
-            sendResize();
-            updateTermStatus(true);
-        };
-
-        termWs.onmessage = (e) => {
+        socket.onmessage = (e) => {
+            if (first) {
+                first = false;
+                let response;
+                try { response = JSON.parse(e.data); } catch {}
+                if (!response?.ready) {
+                    cause = response?.error || '无法连接终端';
+                    socket.close();
+                    return;
+                }
+                terminalStatus('');
+                termFitAddon.fit();
+                termInstance.focus();
+                sendResize();
+                updateTermStatus(true);
+                return;
+            }
             const data = typeof e.data === 'string' ? e.data : new Uint8Array(e.data);
             termInstance.write(data);
             termLogAppend(e.data);
         };
 
-        termWs.onclose = () => {
-            termInstance.writeln('\r\n\x1b[31m✘ Connection closed. Click terminal to reconnect.\x1b[0m');
+        socket.onclose = () => {
             termWs = null;
+            terminalStatus(cause);
             updateTermStatus(false);
+            fetch('/api/profile').then(r => {
+                if (recoveryLoginRequired(r)) reopenLogin();
+            }).catch(() => {});
         };
-
-        termWs.onerror = () => {};
+        socket.onerror = () => { cause = '无法连接终端'; };
     }
 
     function updateTermStatus(online) {
@@ -2113,6 +2145,7 @@
             status.textContent = `尝试连接... (${n}/60)`;
             try {
                 const r = await fetch('/api/devices', { cache: 'no-store' });
+                if (recoveryLoginRequired(r)) { clearInterval(iv); reopenLogin(); return; }
                 if (r.ok) { clearInterval(iv); status.textContent = "✅ 系统已恢复！即将刷新..."; status.style.color = "#155724"; setTimeout(() => location.reload(), 1500); }
             } catch {}
             if (n >= 60) { clearInterval(iv); status.textContent = "⚠️ 等待超时，请手动检查"; status.style.color = "#721c24"; document.getElementById('nav-reboot-btn').classList.remove('disabled'); }
@@ -2991,6 +3024,10 @@
         document.getElementById('flash-panel').classList.remove('advanced');
         document.getElementById('log-panel').classList.remove('visible');
         renderFwDownloads();
+        const view = new URLSearchParams(location.search).get('view');
+        if (Object.hasOwn(recoveryViews, view)) {
+            switchTab(document.querySelector(`.nav-tab[data-panel="${recoveryViews[view]}"]`));
+        }
     };
 </script>
 <script src="/res/settings.js"></script>

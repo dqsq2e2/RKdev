@@ -17,9 +17,10 @@ const settingsMagic = "RkCfgV1\x00"
 const settingsHeaderSize = 52
 
 type recoverySettings struct {
-	Network  *networkConfig `json:"network,omitempty"`
-	SSH      *sshConfig     `json:"ssh,omitempty"`
-	Firewall *firewallSave  `json:"firewall,omitempty"`
+	Network  *networkConfig   `json:"network,omitempty"`
+	SSH      *sshConfig       `json:"ssh,omitempty"`
+	Firewall *firewallSave    `json:"firewall,omitempty"`
+	Account  *recoveryAccount `json:"account,omitempty"`
 }
 
 type recoverySettingsStore struct {

@@ -26,7 +26,7 @@ ROOTFS = {
 }
 ROOT_PACKAGES = (
     "ca-certificates", "e2fsprogs", "e2fsprogs-extra", "gptfdisk", "util-linux",
-    "smartmontools", "iptables", "parted", "sgdisk",
+    "smartmontools", "iptables", "parted", "sgdisk", "openssh-server",
 )
 
 

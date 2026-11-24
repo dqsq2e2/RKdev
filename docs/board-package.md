@@ -17,7 +17,7 @@
 
 可配置网络使用 `/etc/rkdev-network.json`。其中 `ports` 定义逻辑 ID、标签和设备树硬件路径，以免枚举顺序改变 WAN/LAN 角色；`defaults` 定义 WAN、LAN 与 Wi-Fi，`station` 和 `ap_bands` 描述无线能力。`iptables` 选择防火墙后端。启动失败时可回到板包原有的 `/etc/rkdev-network`。eMMC 板包可以指定 `store_offset`，在引导与恢复之间预留两块 16 KiB 的配置区，偏移要求 4 KiB 对齐且不与环境变量重叠。
 
-若板包提供 OpenSSH，可通过 `/etc/rkdev-managed-ssh` 交由恢复服务控制监听。板包初始化仍负责账号和主机密钥，不再自行启动第二个 sshd。
+公共恢复系统管理 OpenSSH、主机密钥和恢复账号。板包可放置 `/etc/rkdev-managed-ssh` 来默认开启 SSH。如果 eMMC 板包在引导和恢复分区之间预留了配置区，可在 `/etc/rkdev-settings-offset` 指定十进制起始字节位置（4 KiB 对齐，需连续 32 KiB）；已有网络配置区的板包复用 `store_offset`。
 
 每种 profile 定义：
 

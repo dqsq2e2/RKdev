@@ -29,8 +29,7 @@ func decodeSettingsRequest(w http.ResponseWriter, r *http.Request, dst any, limi
 
 func setupLocal(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		peer, err := netip.ParseAddrPort(r.RemoteAddr)
-		if err != nil || !peer.Addr().Unmap().IsLoopback() {
+		if !localSetup(r) {
 			jsonErr(w, http.StatusForbidden, "仅供本机设置使用")
 			return
 		}
@@ -38,23 +37,29 @@ func setupLocal(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-func recoveryWeb(next http.Handler) http.Handler {
+const setupSocket = "/run/rkdev/setup.sock"
+
+func localSetup(r *http.Request) bool {
+	addr, ok := r.Context().Value(http.LocalAddrContextKey).(*net.UnixAddr)
+	return ok && addr.Name == setupSocket
+}
+
+func recoveryWeb(s *managementController, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
-		// Recovery intentionally serves the local network without a web login.
-		// Keep the shell and disk APIs off globally routable connections.
 		peer, err := netip.ParseAddrPort(r.RemoteAddr)
 		if err != nil || !localRecoveryAddr(peer.Addr().Unmap()) {
 			http.Error(w, "恢复网页仅供本地网络访问", http.StatusForbidden)
 			return
 		}
-		if strings.HasPrefix(r.URL.Path, "/api/") || (r.Method != http.MethodGet && r.Method != http.MethodHead) {
-			if !recoveryHost(r) {
-				http.Error(w, "请使用本机地址访问恢复系统", http.StatusForbidden)
-				return
-			}
+		if !recoveryHost(r) {
+			http.Error(w, "请使用本机地址访问恢复系统", http.StatusForbidden)
+			return
+		}
+		read := r.Method == http.MethodGet || r.Method == http.MethodHead
+		if strings.HasPrefix(r.URL.Path, "/api/") || !read {
 			if fetch := r.Header.Get("Sec-Fetch-Site"); fetch != "" && fetch != "same-origin" && fetch != "none" {
 				http.Error(w, "拒绝跨站请求", http.StatusForbidden)
 				return
@@ -62,13 +67,33 @@ func recoveryWeb(next http.Handler) http.Handler {
 			origin := r.Header.Get("Origin")
 			if origin != "" {
 				u, err := url.Parse(origin)
-				if err != nil || u.Scheme != "http" || !strings.EqualFold(u.Host, r.Host) || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+				scheme := "http"
+				if r.TLS != nil {
+					scheme = "https"
+				}
+				if err != nil || u.Scheme != scheme || !strings.EqualFold(u.Host, r.Host) || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
 					http.Error(w, "拒绝跨站请求", http.StatusForbidden)
 					return
 				}
 			}
 		}
-		next.ServeHTTP(w, r)
+		if r.TLS == nil {
+			if read && (r.URL.Path == "/" || r.URL.Path == "/login") {
+				target, _ := url.Parse(webPage(r.URL.Path, r.URL.Query().Get("view")))
+				target.Scheme, target.Host = "https", r.Host
+				if host, _, err := net.SplitHostPort(r.Host); err == nil {
+					target.Host = host
+					if strings.Contains(host, ":") {
+						target.Host = "[" + host + "]"
+					}
+				}
+				http.Redirect(w, r, target.String(), http.StatusSeeOther)
+				return
+			}
+			jsonErr(w, http.StatusForbidden, "请通过 HTTPS 访问恢复系统")
+			return
+		}
+		s.serveSession(w, r, next)
 	})
 }
 
@@ -95,37 +120,55 @@ func recoveryHost(r *http.Request) bool {
 	return name != "" && (host == name || host == name+".local")
 }
 
-func redirectToHTTP(w http.ResponseWriter, r *http.Request) {
-	host := r.Host
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
-		if strings.Contains(host, ":") {
-			host = "[" + host + "]"
-		}
-	}
-	w.Header().Set("Cache-Control", "no-store")
-	http.Redirect(w, r, (&url.URL{Scheme: "http", Host: host, Path: "/"}).String(), http.StatusMovedPermanently)
-}
-
 func serveWeb() error {
+	app := logRequests(http.DefaultServeMux)
+	setup, err := listenSetup()
+	if err != nil {
+		return fmt.Errorf("HDMI setup service: %w", err)
+	}
+	defer setup.Close()
+	go func() {
+		server := &http.Server{Handler: app, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: time.Minute}
+		log.Printf("[HDMI setup] %v", server.Serve(setup))
+	}()
+	handler := recoveryWeb(&management, app)
 	web := &http.Server{
-		Addr: ":80", Handler: recoveryWeb(logRequests(http.DefaultServeMux)),
+		Addr: ":80", Handler: handler,
 		ReadHeaderTimeout: 10 * time.Second, IdleTimeout: time.Minute,
 	}
 	go func() {
 		cert, err := generateSelfSignedCert()
 		if err != nil {
-			log.Printf("[HTTPS redirect] %v", err)
+			log.Printf("[HTTPS] %v", err)
 			return
 		}
-		redirect := &http.Server{
-			Addr: ":443", Handler: http.HandlerFunc(redirectToHTTP), ReadHeaderTimeout: 5 * time.Second,
+		secure := &http.Server{
+			Addr: ":443", Handler: handler, ReadHeaderTimeout: web.ReadHeaderTimeout, IdleTimeout: web.IdleTimeout,
 			TLSConfig: &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
+			// The Web terminal upgrades an HTTP/1.1 connection to WebSocket.
+			Protocols: new(http.Protocols),
 		}
-		log.Printf("[HTTPS redirect] %v", redirect.ListenAndServeTLS("", ""))
+		secure.Protocols.SetHTTP1(true)
+		log.Printf("[HTTPS] %v", secure.ListenAndServeTLS("", ""))
 	}()
 	log.Printf("RKdev %s: HTTP :80", buildTime)
 	return web.ListenAndServe()
+}
+
+func listenSetup() (net.Listener, error) {
+	// Both processes run as root. A private socket keeps the physical HDMI
+	// console independent of browser sessions without trusting TCP loopback.
+	const dir = "/run/rkdev"
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(dir, 0700); err != nil {
+		return nil, err
+	}
+	if err := os.Remove(setupSocket); err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+	return net.Listen("unix", setupSocket)
 }
 
 func handleProfile(w http.ResponseWriter, r *http.Request) {

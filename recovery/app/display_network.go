@@ -65,12 +65,6 @@ func cloneSetupFirewall(c firewallSave) firewallSave {
 	return c
 }
 
-type setupSSHModel struct {
-	Supported, Persistent bool
-	Config                sshConfig
-	Message               string
-}
-
 func setupYes(v bool) string {
 	if v {
 		return "启用"
@@ -408,60 +402,6 @@ func (u *setupUI) showFirewallRule() {
 		u.showFirewall()
 	}})
 	u.define("", rows...)
-}
-
-func (u *setupUI) loadSSH() {
-	u.showSSH()
-	var v setupSSHModel
-	u.sshIO.read(u, "ssh/config", &v, func(err error) {
-		if err == nil && !u.sshChanged() && u.dialog == nil {
-			u.ssh, u.sshDraft, u.sshLoaded = v, v.Config, true
-		}
-		if u.page == setupPageSSH {
-			u.fail(err)
-			u.showSSH()
-		}
-	})
-}
-
-func (u *setupUI) sshChanged() bool { return u.sshDraft != u.ssh.Config }
-
-func (u *setupUI) showSSH() {
-	s := &u.ssh
-	c := &u.sshDraft
-	if !u.sshLoaded {
-		u.define("正在读取 SSH 设置…")
-		return
-	}
-	if !s.Supported {
-		u.define("", setupRow{"此板包未启用可配置 SSH", "", nil})
-		return
-	}
-	keyLines := strings.FieldsFunc(c.Keys, func(r rune) bool { return r == '\n' })
-	rows := []setupRow{
-		setupToggle("SSH 监听", &c.Enabled, u.showSSH),
-		{"监听端口", strconv.Itoa(c.Port), func() {
-			u.change("监听端口", strconv.Itoa(c.Port), false, func(p string) { c.Port, _ = strconv.Atoi(p); u.showSSH() })
-		}},
-		setupToggle("允许密码登录", &c.Password, u.showSSH),
-		{"添加公钥", fmt.Sprintf("%d 条", len(keyLines)), func() {
-			u.change("输入一条 OpenSSH 公钥", "", false, func(key string) {
-				key = strings.TrimSpace(key)
-				if key != "" {
-					c.Keys = strings.Join(append(keyLines, key), "\n")
-				}
-				u.showSSH()
-			})
-		}},
-		{"清空公钥", "", func() {
-			u.confirm("清空公钥", "保存后从恢复系统移除已配置公钥。", func() { c.Keys = ""; u.showSSH() })
-		}},
-	}
-	hint := ""
-	if !s.Persistent {
-		hint = "这些设置仅在本次启动中生效。"
-	}
-	u.define(hint, rows...)
 }
 
 func setupAddress(address string) string {

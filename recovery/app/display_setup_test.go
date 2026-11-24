@@ -122,7 +122,7 @@ func TestSetupNetworkSlowPollStillAllowsKeys(t *testing.T) {
 		t.Fatal("network selection did not move during the status read")
 	}
 	u.key("Right")
-	if u.page != setupPageSSH {
+	if u.page != setupPageManagement {
 		t.Fatal("could not leave the network page during the status read")
 	}
 	u.key("Right")
@@ -131,7 +131,7 @@ func TestSetupNetworkSlowPollStillAllowsKeys(t *testing.T) {
 	}
 	close(release)
 	completeSetupUntil(t, u, func() bool {
-		return !u.network.io.reading && !u.sshIO.reading && !u.mediaListIO.reading && !u.mediaJobIO.reading
+		return !u.network.io.reading && !u.management.io.reading && !u.mediaListIO.reading && !u.mediaJobIO.reading
 	})
 	if u.page != setupPageFlash {
 		t.Fatal("an earlier status result changed the current page")
@@ -221,8 +221,14 @@ func TestSetupSaveAndRevert(t *testing.T) {
 					return setupTestResponse(200, fmt.Sprintf(`{"id":"fw","status":"applying","deadline":%q}`, deadline)), nil
 				case p == "/api/firewall/trial":
 					writes <- "firewall:confirm"
-				case p == "/api/ssh/config":
-					writes <- "ssh:save"
+				case p == "/api/management":
+					var req managementEdit
+					_ = json.NewDecoder(r.Body).Decode(&req)
+					if req.SSH == nil || req.SSH.Port != 2222 || req.Account == nil || req.Account.Username != "operator" {
+						t.Error("SSH and account were not saved together")
+					}
+					writes <- "management:save"
+					return setupTestResponse(200, `{"persistent":true,"username":"operator","ssh":{"port":2222,"enabled":true,"password":true}}`), nil
 				case p == "/api/setup/boot":
 					var req setupBootEdit
 					_ = json.NewDecoder(r.Body).Decode(&req)
@@ -238,8 +244,9 @@ func TestSetupSaveAndRevert(t *testing.T) {
 			u.page = setupPageExit
 			u.network.draft.WAN.Mode = "dhcp"
 			u.firewall.draft = firewallSave{true, []firewallRule{{Chain: "input", Action: "ACCEPT"}, {Chain: "forward", Action: "REJECT"}}}
-			u.ssh.Persistent = true
-			u.sshDraft = sshConfig{Port: 2222, Enabled: true, Password: true}
+			u.management.reset(managementState{Persistent: true, Username: "root", SSH: &sshConfig{Port: 22, Enabled: true, Password: true}})
+			u.management.ssh.Port = 2222
+			u.management.account = accountEdit{Username: "operator", Password: "test password"}
 			u.boot.edit = setupBootEdit{Order: []string{"usb", "emmc"}, Vars: map[string]string{"console": "serial"}}
 			u.showExit()
 			u.key("F10")
@@ -276,12 +283,24 @@ func TestSetupSaveAndRevert(t *testing.T) {
 			}
 			want := []string{"net:apply", "net:revert"}
 			if !revert {
-				want = []string{"net:apply", "net:confirm", "firewall:start", "firewall:confirm", "ssh:save", "boot:save"}
+				want = []string{"net:apply", "net:confirm", "firewall:start", "firewall:confirm", "management:save", "boot:save"}
 			}
 			if !slices.Equal(got, want) {
 				t.Fatalf("write sequence = %v, want %v", got, want)
 			}
 		})
+	}
+}
+
+func TestSetupDiscardAccount(t *testing.T) {
+	u := setupTestUI(t)
+	u.page = setupPageExit
+	u.management.reset(managementState{Username: "root"})
+	u.management.account = accountEdit{Username: "operator", Password: "test password"}
+	u.discardPrompt(false)
+	u.key("Enter")
+	if u.management.changed() || u.management.account != (accountEdit{Username: "root"}) {
+		t.Fatal("discard left the account draft in memory")
 	}
 }
 

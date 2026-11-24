@@ -42,6 +42,19 @@
 .setting-field textarea { resize: vertical; }
 .settings-message { color: var(--text-muted); font-size: 0.9rem; overflow-wrap: anywhere; }
 .settings-error { color: #c85837; }
+.management-group { margin-block: 18px; }
+.management-group legend {
+    padding: 0;
+    margin-bottom: 8px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+.management-wide { grid-column: 1 / -1; }
+#terminal-panel:has(#terminal-secure:not([hidden])) > :not(#terminal-secure) { display: none; }
+#terminal-panel:has(#terminal-auth:not([hidden])) > :not(#terminal-auth) { display: none; }
+#terminal-auth[hidden] { display: none; }
+#terminal-auth { max-width: 560px; }
+#terminal-auth .settings-actions { grid-column: 1 / -1; }
 .settings-trial:not([hidden]) {
     display: flex;
     flex-wrap: wrap;

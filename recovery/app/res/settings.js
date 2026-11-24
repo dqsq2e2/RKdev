@@ -17,6 +17,7 @@
         const r = await fetch('/api/' + path, body === undefined ? {} : {
             method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body)
         });
+        if (recoveryLoginRequired(r)) reopenLogin();
         const data = await r.json();
         if (!r.ok || data?.error) throw new Error(data?.error || '请求失败 (' + r.status + ')');
         return data;
@@ -237,37 +238,121 @@
         }, 1000);
     }
 
-    async function openSSH() {
-        const mount = get('ssh-settings');
+    let managementDraft, managementLoading = false;
+    async function openManagement() {
+        if (managementLoading || managementDraft?.hasEdits()) return;
+        const mount = get('management-settings');
+        managementLoading = true;
         try {
-            const d = await api('ssh/config');
-            if (!d.supported) {
-                mount.replaceChildren(tag('p', '此板包未启用可配置 SSH。', 'settings-message'));
+            renderManagement(await api('management'));
+        } catch (e) {
+            mount.replaceChildren(button('重试', openManagement), tag('p', e.message, 'settings-error'));
+        } finally { managementLoading = false; }
+    }
+
+    function renderManagement(state) {
+        const mount = get('management-settings');
+        const form = tag('form', '', 'management-form');
+        const groups = [], msg = status();
+        const section = title => {
+            const controls = tag('fieldset', '', 'settings-fields management-group');
+            controls.append(tag('legend', title));
+            form.append(controls);
+            groups.push(controls);
+            return controls;
+        };
+        const secret = kind => {
+            const p = input('', 'password');
+            p.autocomplete = kind;
+            p.maxLength = 128;
+            return p;
+        };
+        const username = input(state.username, 'text');
+        const password = secret('new-password'), confirm = secret('new-password');
+        const current = secret('current-password');
+        username.autocomplete = 'off';
+        username.maxLength = 32;
+        username.spellcheck = false;
+        password.placeholder = '留空保留现有密码';
+        if (state.username) {
+            const account = section('恢复系统账号');
+            account.append(field('账号', username));
+            account.append(field('新密码', password), field('确认新密码', confirm));
+        }
+        const c = state.ssh ? {...state.ssh} : null;
+        const ssh = section('SSH');
+        if (c) {
+            const keys = document.createElement('textarea');
+            keys.rows = 3;
+            keys.value = c.keys;
+            keys.maxLength = 4096;
+            keys.spellcheck = false;
+            keys.addEventListener('input', () => c.keys = keys.value.replace(/\r\n/g, '\n'));
+            const port = input(c.port, 'number', v => c.port = Number(v));
+            port.min = 1;
+            port.max = 65535;
+            const publicKeys = field('OpenSSH 公钥（每行一条）', keys);
+            publicKeys.classList.add('management-wide');
+            ssh.append(field('启用 SSH', input(c.enabled, 'checkbox', v => c.enabled = v)),
+                field('监听端口', port), field('允许密码登录', input(c.password, 'checkbox', v => c.password = v)), publicKeys);
+        } else ssh.append(tag('p', '未安装', 'settings-message'));
+        message(msg, state.message || (state.persistent ? '' : '设置仅在本次启动中生效。'));
+
+        if (!state.username) {
+            managementDraft = null;
+            for (const group of groups) group.disabled = true;
+            mount.replaceChildren(form, msg);
+            return;
+        }
+
+        const accountChanged = () => username.value.trim() !== state.username || !!password.value;
+        const sshChanged = () => c && (c.enabled !== state.ssh.enabled || c.port !== state.ssh.port ||
+            c.password !== state.ssh.password || c.keys !== state.ssh.keys);
+        let saving = false;
+        const hasEdits = () => saving || !!(accountChanged() || sshChanged() || confirm.value || current.value);
+        managementDraft = {hasEdits};
+        current.required = true;
+        section('确认身份').append(field('当前密码', current));
+        const actions = tag('div', '', 'settings-actions');
+        const save = tag('button', '保存并应用', 'btn-boot-save');
+        save.type = 'submit';
+        const discard = button('放弃更改', () => renderManagement(state));
+        const controls = () => {
+            save.disabled = saving || (!accountChanged() && !sshChanged());
+            discard.disabled = saving || !hasEdits();
+            for (const group of groups) group.disabled = saving;
+        };
+        actions.append(save, discard);
+        form.append(actions, msg);
+        form.addEventListener('input', controls);
+        form.addEventListener('submit', async event => {
+            event.preventDefault();
+            if (save.disabled) return;
+            if (password.value !== confirm.value) {
+                message(msg, '两次输入的密码不一致', true);
+                confirm.focus();
                 return;
             }
-            const form = tag('fieldset', '', 'settings-fields');
-            const msg = status(), c = d.config;
-            const keys = document.createElement('textarea');
-            keys.rows = 4;
-            keys.value = c.keys;
-            keys.addEventListener('input', () => c.keys = keys.value.replace(/\r\n/g, '\n'));
-            form.append(field('启用 SSH', input(c.enabled,'checkbox',v => c.enabled = v)),
-                field('监听端口', input(c.port,'number',v => c.port = Number(v))),
-                field('允许密码登录', input(c.password,'checkbox',v => c.password = v)),
-                field('OpenSSH 公钥（每行一条）', keys));
-            const save = button('保存并应用', async () => {
-                save.disabled = true;
-                try {
-                    const saved = await api('ssh/config', c);
-                    message(msg, saved.message);
-                } catch (e) { message(msg, e.message, true); }
-                finally { save.disabled = false; }
-            }, 'btn-boot-save');
-            message(msg, d.message || (d.persistent ? '' : '配置仅在本次启动中生效。'));
-            mount.replaceChildren(form, save, msg);
-        } catch (e) {
-            mount.replaceChildren(button('重试', openSSH), tag('p', e.message, 'settings-error'));
-        }
+            const edit = {current_password: current.value};
+            if (accountChanged()) edit.account = {username: username.value.trim(), password: password.value};
+            if (sshChanged()) edit.ssh = c;
+            saving = true;
+            controls();
+            try {
+                const state = await api('management', edit);
+                if (state.login_required) reopenLogin(true);
+                else renderManagement(state);
+            }
+            catch (e) {
+                current.value = '';
+                message(msg, e.message, true);
+            } finally {
+                saving = false;
+                controls();
+            }
+        });
+        mount.replaceChildren(form);
+        controls();
     }
 
     const mediaIcons = {
@@ -770,5 +855,5 @@
         }
     }
     pollMedia();
-    window.rkSettings = {openNetwork, openSSH, drawFirewallTrial, firewallTrialActive:() => !!fwTrial};
+    window.rkSettings = {openNetwork, openManagement, drawFirewallTrial, firewallTrialActive:() => !!fwTrial};
 })();

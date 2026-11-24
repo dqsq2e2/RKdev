@@ -1,11 +1,12 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
-	"net/http"
 	"os"
+	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
@@ -21,16 +22,19 @@ type sshConfig struct {
 	Keys     string `json:"keys"`
 }
 
-type sshController struct {
-	mu        sync.Mutex
-	cfg       sshConfig
-	supported bool
-	store     *recoverySettingsStore
-	proc      *netRuntime
-	message   string
+type managementController struct {
+	mu         sync.Mutex
+	cfg        sshConfig
+	supported  bool
+	account    recoveryAccount
+	sessions   webSessions
+	accountDir string
+	store      *recoverySettingsStore
+	proc       *netRuntime
+	message    string
 }
 
-var recoverySSH sshController
+var management managementController
 var sshType = regexp.MustCompile(`^(ssh-(ed25519|rsa)|ecdsa-sha2-nistp(256|384|521)|sk-(ssh-ed25519|ecdsa-sha2-nistp256)@openssh.com)$`)
 
 func (c sshConfig) validate() error {
@@ -59,36 +63,7 @@ func (c sshConfig) validate() error {
 	return nil
 }
 
-func startSettingsControls(n *netController) {
-	var store *recoverySettingsStore
-	var saved recoverySettings
-	backend := "iptables"
-	if n != nil {
-		backend, store = n.defaults.Firewall, n.store
-		if store != nil {
-			saved, _ = store.read()
-		}
-	}
-	startFirewall(store, backend, saved.Firewall)
-	s := &recoverySSH
-	if _, err := os.Stat("/etc/rkdev-managed-ssh"); err != nil {
-		return
-	}
-	s.cfg, s.supported, s.store = sshConfig{Enabled: true, Port: 22, Password: true}, true, store
-	if c := saved.SSH; c != nil && c.validate() == nil {
-		if err := s.apply(*c); err == nil {
-			s.cfg = *c
-			return
-		} else {
-			s.message = "未能加载保存的 SSH，尝试恢复默认：" + err.Error()
-		}
-	}
-	if err := s.apply(s.cfg); err != nil {
-		s.message = "SSH 启动失败：" + err.Error()
-	}
-}
-
-func (s *sshController) apply(c sshConfig) error {
+func (s *managementController) applySSH(c sshConfig, username string) error {
 	const keys = netRunDir + "/ssh-authorized-keys"
 	if err := os.MkdirAll(netRunDir, 0700); err != nil {
 		return err
@@ -108,6 +83,16 @@ func (s *sshController) apply(c sshConfig) error {
 	if !c.Enabled {
 		return nil
 	}
+	for _, dir := range []string{"/run/sshd", "/var/empty"} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return err
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if err := exec.CommandContext(ctx, "ssh-keygen", "-A").Run(); err != nil {
+		return fmt.Errorf("SSH 主机密钥初始化失败：%w", err)
+	}
 	if err := os.WriteFile(keys, []byte(strings.TrimSpace(c.Keys)+"\n"), 0600); err != nil {
 		return err
 	}
@@ -122,6 +107,9 @@ func (s *sshController) apply(c sshConfig) error {
 	}
 	args := []string{"-p", strconv.Itoa(c.Port), "-o", "PermitRootLogin=yes", "-o", "PasswordAuthentication=" + pw,
 		"-o", "KbdInteractiveAuthentication=no", "-o", "AuthorizedKeysFile=" + keys + " .ssh/authorized_keys"}
+	if username != "root" {
+		args = append(args, "-o", "DenyUsers=root")
+	}
 	if err := netExec("/usr/sbin/sshd", append([]string{"-t"}, args...)...); err != nil {
 		return err
 	}
@@ -131,48 +119,4 @@ func (s *sshController) apply(c sshConfig) error {
 	}
 	s.proc = p
 	return nil
-}
-
-func handleSSHConfig(w http.ResponseWriter, r *http.Request) {
-	s := &recoverySSH
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if r.Method == http.MethodGet {
-		jsonOK(w, map[string]any{"supported": s.supported, "config": s.cfg, "persistent": s.store != nil, "message": s.message})
-		return
-	}
-	if r.Method != http.MethodPost {
-		jsonErr(w, 405, "仅支持 GET/POST")
-		return
-	}
-	if !s.supported || !configTrialMu.TryLock() {
-		jsonErr(w, 409, "SSH 不可配置或已有配置正在应用")
-		return
-	}
-	defer configTrialMu.Unlock()
-	var c sshConfig
-	if err := decodeSettingsRequest(w, r, &c, 6<<10); err != nil {
-		jsonErr(w, 400, "无效 SSH 配置")
-		return
-	}
-	if err := c.validate(); err != nil {
-		jsonErr(w, 400, err.Error())
-		return
-	}
-	if err := s.apply(c); err != nil {
-		_ = s.apply(s.cfg)
-		jsonErr(w, 409, err.Error())
-		return
-	}
-	message := "已生效，仅本次启动"
-	if s.store != nil {
-		if err := s.store.save(func(saved *recoverySettings) { saved.SSH = &c }); err != nil {
-			_ = s.apply(s.cfg)
-			jsonErr(w, 409, "未保存 SSH："+err.Error())
-			return
-		}
-		message = "SSH 已保存并生效"
-	}
-	s.cfg, s.message = c, message
-	jsonOK(w, map[string]string{"message": message})
 }

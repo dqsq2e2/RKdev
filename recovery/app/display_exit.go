@@ -9,7 +9,7 @@ import (
 const (
 	setupSaveNetwork  = "网络"
 	setupSaveFirewall = "防火墙"
-	setupSaveSSH      = "SSH"
+	setupSaveManage   = "管理"
 	setupSaveBoot     = "引导"
 )
 
@@ -34,7 +34,7 @@ func (u *setupUI) changes() []string {
 		name    string
 		changed bool
 	}{{setupSaveBoot, u.boot.changed()}, {setupSaveNetwork, u.network.changed()},
-		{setupSaveFirewall, u.firewall.changed()}, {setupSaveSSH, u.sshChanged()}} {
+		{setupSaveFirewall, u.firewall.changed()}, {setupSaveManage, u.management.changed()}} {
 		if s.changed {
 			names = append(names, s.name)
 		}
@@ -69,7 +69,7 @@ func (u *setupUI) discardPrompt(reboot bool) {
 		u.resetNetworkDraft()
 		u.firewall.draft = cloneSetupFirewall(u.firewall.base)
 		u.firewall.newRule = firewallRule{}
-		u.sshDraft = u.ssh.Config
+		u.management.reset(u.management.base)
 		u.message = "已放弃未保存的更改"
 		u.showExit()
 		if reboot {
@@ -91,8 +91,15 @@ func (u *setupUI) savePrompt(reboot bool) {
 		return
 	}
 	u.confirm(title, body, func() {
-		if u.sshChanged() {
-			if err := u.sshDraft.validate(); err != nil {
+		management := u.management.edit()
+		if management.SSH != nil {
+			if err := management.SSH.validate(); err != nil {
+				u.fail(err)
+				return
+			}
+		}
+		if management.Account != nil {
+			if err := management.Account.validate(); err != nil {
 				u.fail(err)
 				return
 			}
@@ -101,7 +108,7 @@ func (u *setupUI) savePrompt(reboot bool) {
 		u.bootIO.revision++
 		u.network.io.revision++
 		u.firewallIO.revision++
-		u.sshIO.revision++
+		u.management.io.revision++
 		u.save = &setupSave{reboot: reboot}
 		u.advanceSave()
 	})
@@ -129,12 +136,12 @@ func (u *setupUI) advanceSave() {
 			s.trial = t
 			u.updateSave()
 		})
-	case u.sshChanged():
-		s.step = setupSaveSSH
-		config := u.sshDraft
-		u.saveRequest("ssh/config", config, nil, func() {
-			u.ssh.Config = config
-			u.savedStep(u.ssh.Persistent)
+	case u.management.changed():
+		s.step = setupSaveManage
+		var state managementState
+		u.saveRequest("management", u.management.edit(), &state, func() {
+			u.management.reset(state)
+			u.savedStep(state.Persistent)
 		})
 	case u.boot.changed():
 		s.step = setupSaveBoot
@@ -314,7 +321,7 @@ func (u *setupUI) showSave() {
 				addr = setupAddress(n.LANActual)
 			}
 			if addr != "" {
-				rows = append(rows, setupRow{"试用管理地址", "http://" + addr + "/", nil})
+				rows = append(rows, setupRow{"试用管理地址", "https://" + addr + "/", nil})
 			} else if n.Config.WAN.Mode == "dhcp" {
 				rows = append(rows, setupRow{"WAN", "等待 DHCP 地址", nil})
 			}
