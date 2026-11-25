@@ -21,6 +21,7 @@ const setupWidth, setupHeight = 1024, 576
 const (
 	fbioVar    = 0x4600
 	fbioFix    = 0x4602
+	fbioBlank  = 0x4611
 	kdMode     = 0x4b3a
 	kdText     = 0
 	kdGraphics = 1
@@ -126,7 +127,7 @@ func (f *framebuffer) close() {
 	_ = f.file.Close()
 }
 
-func (f *framebuffer) paint(src *image.RGBA) {
+func (f *framebuffer) paint(src *image.RGBA) error {
 	v := f.v
 	pixelSize := int(v.bpp / 8)
 	screenW, screenH := int(v.w), int(v.h)
@@ -170,6 +171,8 @@ func (f *framebuffer) paint(src *image.RGBA) {
 			}
 		}
 	}
+	// Pixel writes alone do not restore an output blanked during console handoff.
+	return devIO(f.file, fbioBlank, 0)
 }
 
 type setupTTY struct {

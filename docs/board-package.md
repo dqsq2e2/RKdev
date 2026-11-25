@@ -13,7 +13,7 @@
 
 如果 overlay 提供 `/etc/rkdev-network`，公共启动脚本在回环接口和板级初始化就绪后后台运行它，代替对物理 Ethernet 接口逐个启动 DHCP。overlay 可以提供 `/etc/inittab` 设置板上的登录终端；保留 `/usr/sbin/rkdev-start` 与 `/usr/bin/rkdev` 两个公共入口。
 
-要启用本地恢复界面，在 overlay 放置 `/etc/rkdev-display-enabled`，将 inittab 的 tty1 入口设为 `tty1::respawn:/usr/sbin/rkdev-display`。内核应启用 VT、键盘输入和 HDMI/DP 对应的 DRM 驱动及 fbdev 兼容层。显示初始化失败时 tty1 回到原登录终端；串口可独立设置。
+公共 inittab 通过 `tty1::respawn:/usr/sbin/rkdev-display` 启动本地恢复界面，等待显示设备及恢复服务就绪。内核应启用 VT、键盘输入和 HDMI/DP 对应的 DRM 驱动及 fbdev 兼容层。板包覆盖 inittab 时应保留该入口，串口终端可独立设置。
 
 可配置网络使用 `/etc/rkdev-network.json`。其中 `ports` 定义逻辑 ID、标签和设备树硬件路径，以免枚举顺序改变 WAN/LAN 角色；`defaults` 定义 WAN、LAN 与 Wi-Fi，`station` 和 `ap_bands` 描述无线能力。`iptables` 选择防火墙后端。启动失败时可回到板包原有的 `/etc/rkdev-network`。eMMC 板包可以指定 `store_offset`，在引导与恢复之间预留两块 16 KiB 的配置区，偏移要求 4 KiB 对齐且不与环境变量重叠。
 

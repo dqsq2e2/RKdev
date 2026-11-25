@@ -172,15 +172,11 @@ func (u *setupUI) async(work func() error, done func(error)) {
 func runSetup() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
-	frame, err := openFramebuffer()
-	for range 8 {
-		if err == nil {
-			break
-		}
-		time.Sleep(600 * time.Millisecond)
-		frame, err = openFramebuffer()
-	}
+	frame, err := waitFramebuffer(ctx)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
 		return err
 	}
 	defer frame.close()
@@ -218,7 +214,9 @@ func runSetup() error {
 				return err
 			}
 			u.paint(paint)
-			frame.paint(paint.image)
+			if err := frame.paint(paint.image); err != nil {
+				return err
+			}
 			u.dirty = false
 		}
 		select {
@@ -246,6 +244,22 @@ func runSetup() error {
 				u.key(k)
 				u.dirty = true
 			}
+		}
+	}
+}
+
+func waitFramebuffer(ctx context.Context) (*framebuffer, error) {
+	retry := time.NewTicker(600 * time.Millisecond)
+	defer retry.Stop()
+	for {
+		frame, err := openFramebuffer()
+		if err == nil || !(errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENODEV)) {
+			return frame, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-retry.C:
 		}
 	}
 }
