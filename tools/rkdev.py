@@ -18,6 +18,7 @@ from pathlib import Path
 from contract import Invalid, canonical, fw_env_config, load_board, path_in, read_json, require, runtime, write_json
 from image import environment_text, pack, run, sha, verify
 from uboot import BOOT_UI_DISPLAY, BOOT_UI_USB, inject, profile_header, put_settings, settings
+from version import allocate_version, build_date
 
 CORE = Path(__file__).resolve().parents[1]
 ROOTFS = {
@@ -112,6 +113,8 @@ def source_key(board_root, board_path, cfg, data, component, lock):
     if component == "uboot":
         files += [CORE / "boot/rkdev.c", CORE / "boot/rkdev-logo.bmp.gz", CORE / "tools/uboot.py"]
         files += sorted((CORE / "boot/video").glob("*.[ch]"))
+    else:
+        files += [CORE / "recovery/kernel/logo_linux_clut224.ppm"]
     files += sorted((CORE / ("boot" if component == "uboot" else "recovery/kernel") / "patches").glob("*.patch"))
     files += [path_in(board_root, p) for p in cfg[component].get("patches", [])]
     if "overlay" in cfg[component]:
@@ -157,6 +160,8 @@ def stage_source(args, board_root, cfg, data, component, lock):
                 dts_target.write_text(dts.read_text(), encoding="utf-8")
                 (stage / "configs/rkdev_defconfig").write_text(config)
             else:
+                shutil.copyfile(CORE / "recovery/kernel/logo_linux_clut224.ppm",
+                                stage / "drivers/video/logo/logo_linux_clut224.ppm")
                 dts_target = stage / "arch/arm64/boot/dts/rockchip" / dts.name
                 chosen = "\n/ { chosen {\n" + "".join(
                     f"  rkdev,{k.replace('_','-')} = {json.dumps(str(data[k]))};\n"
@@ -165,6 +170,9 @@ def stage_source(args, board_root, cfg, data, component, lock):
                 dts_target.write_text(dts.read_text() + chosen, encoding="utf-8")
                 config = put_settings(config, {"CONFIG_INITRAMFS_SOURCE": '""', "CONFIG_BLK_DEV_INITRD": "y",
                                                "CONFIG_RD_GZIP": "y", "CONFIG_DEVTMPFS": "y",
+                                               "CONFIG_LOGO": "y", "CONFIG_LOGO_LINUX_CLUT224": "y",
+                                               "CONFIG_LOGO_LINUX_MONO": "n", "CONFIG_LOGO_LINUX_VGA16": "n",
+                                               "CONFIG_FRAMEBUFFER_CONSOLE_DEFERRED_TAKEOVER": "n",
                                                "CONFIG_LOCALVERSION": '"-rkdev"', "CONFIG_LOCALVERSION_AUTO": "n"})
                 (stage / "arch/arm64/configs/rkdev_defconfig").write_text(config)
             stage.rename(source)
@@ -217,6 +225,9 @@ def build_linux(args, root, cfg, data, lock):
     dts = path_in(root, cfg["linux"]["dts"]).stem
     make = ["make", "-C", source, f"O={out}"]
     run([*make, "rkdev_defconfig"], env=env)
+    selected = set((out / ".config").read_text().splitlines())
+    require({"CONFIG_LOGO=y", "CONFIG_LOGO_LINUX_CLUT224=y"} <= selected,
+            "kernel lost the shared recovery boot logo configuration")
     run([*make, f"-j{args.jobs}", "Image", "modules", f"rockchip/{dts}.dtb"], env=env)
     modules = out / "installed-modules"
     run([*make, "modules_install", f"INSTALL_MOD_PATH={modules}", "INSTALL_MOD_STRIP=1"], env=env)
@@ -343,7 +354,7 @@ def main(argv=None):
     parser.add_argument("--firmware-dir", type=Path, action="append", default=[])
     parser.add_argument("--cross-compile", default="aarch64-linux-gnu-")
     parser.add_argument("--jobs", type=int, default=max(1, os.cpu_count() or 1))
-    parser.add_argument("--version", default="0.1-dev")
+    parser.add_argument("--version", help="image version (default: build date and daily revision)")
     parser.add_argument("--epoch", type=int, default=int(os.environ.get("SOURCE_DATE_EPOCH", 1795305600)))
     parser.add_argument("--locked", action="store_true", help="the build always uses sources.lock")
     parser.add_argument("--image", type=Path)
@@ -355,7 +366,7 @@ def main(argv=None):
     args.out = args.out.resolve()
     try:
         require(1 <= args.jobs <= 256, "--jobs must be between 1 and 256")
-        require(re.fullmatch(r"[a-zA-Z0-9._-]{1,64}", args.version), "invalid version")
+        require(args.version is None or re.fullmatch(r"[a-zA-Z0-9._-]{1,64}", args.version), "invalid version")
         root, board, profile, cfg = load_board(args.board, args.profile)
         data = runtime(board, profile, cfg)
         lock = read_json(CORE / "sources.lock")
@@ -376,6 +387,11 @@ def main(argv=None):
             require(all((args.image, args.loader, args.default_env, args.recovery)), "pack needs --image, --loader, --default-env and --recovery")
             pack(data, args.loader, args.default_env, args.recovery, args.image, spi_trim=trim)
         else:
+            day = build_date()
+            if args.command == "build" and args.version is None:
+                args.version = allocate_version(args.out, day)
+            if args.command == "build":
+                print(f"RKdev version: {args.version}", flush=True)
             if args.command in ("boot", "build"):
                 loader, env, boot_out = build_uboot(args, root, board, cfg, data, lock)
                 shutil.copyfile(loader, args.out / loader.name)
@@ -390,14 +406,15 @@ def main(argv=None):
                     rootfs, packages = build_rootfs(args, root, board, cfg, data, stage, modules, version, env.read_bytes())
                     payload, kernel, content = make_payload(args, cfg, data, stage, rootfs, image, dtb)
                     name = f"{board['board_id']}-{board['revision']}-{profile}-{args.version}.img"
-                    info = {**lock, "version": args.version, "kernel_release": version,
+                    info = {**lock, "version": args.version, "build_date": day.isoformat(),
+                            "kernel_release": version,
                             "firmware": {k: v["sha256"] for k, v in board["firmware"].items()},
                             "rootfs": {**ROOTFS, "apk": packages},
                             "cc": run([args.cross_compile + "gcc", "--version"], capture_output=True, text=True).stdout.splitlines()[0]}
                     manifest = pack(data, loader, env, payload, args.out / name, source_info=info, spi_trim=trim)
                     (args.out / "SHA256SUMS").write_text(f"{manifest['image']['sha256']}  {name}\n")
                     print(f"verified recovery image: {args.out / name}")
-    except (Invalid, OSError, KeyError, TypeError, subprocess.CalledProcessError, json.JSONDecodeError) as error:
+    except (Invalid, OSError, KeyError, TypeError, ValueError, subprocess.CalledProcessError) as error:
         print(f"rkdev: {error}", file=sys.stderr)
         return 1
     return 0

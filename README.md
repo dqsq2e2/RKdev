@@ -23,13 +23,15 @@ go version                       # recovery/app/go.mod 中指定最低版本
 board=../my-boards/boards/my-board/v1
 python3 tools/rkdev.py lint --board "$board" --profile emmc
 sudo env "PATH=$PATH" python3 tools/rkdev.py build \
-  --board "$board" --profile emmc --locked --version 0.1-dev \
+  --board "$board" --profile emmc --locked \
   --firmware-dir /path/to/board-firmware --out out/my-board
 python3 tools/rkdev.py verify --board "$board" --profile emmc \
-  --image out/my-board/my-board-v1-emmc-0.1-dev.img
+  --image out/my-board/my-board-v1-emmc-11.26-r1.img
 ```
 
 官方板包的云编译入口在 [RKdev-boards 的 GitHub Actions](https://github.com/dqsq2e2/RKdev-boards/actions)。在 ARM64 Linux 上本机构建也可传 `--cross-compile=`，直接使用本机 GCC。
+
+版本按北京时间的构建日期编号，例如 `11.26-r1`。本地构建在输出目录内递增当天序号，也可用 `--version` 指定版本。
 
 支持 SPI 的板包用 `--profile spi`。这一步选定镜像及写入介质；Web 会显示实际恢复模式。要分别构建 U-Boot 和内核可执行 `boot`、`kernel`；`prepare` 会生成布局、环境位置和 U-Boot 配置头。开发者可用 `pack` 组装已有组件，用 `verify` 独立验证。
 
