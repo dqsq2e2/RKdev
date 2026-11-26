@@ -6,8 +6,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"strconv"
-	"strings"
 )
 
 type managementState struct {
@@ -28,17 +26,10 @@ func startSettingsControls(n *netController) {
 	backend := "iptables"
 	if n != nil {
 		backend, store = n.defaults.Firewall, n.store
-	}
-	if store == nil && identityError == nil {
-		data, err := os.ReadFile("/etc/rkdev-settings-offset")
-		if err == nil {
-			var offset int64
-			offset, err = strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
-			if err == nil {
-				store, err = newRecoverySettingsStore(currentLayout, offset)
-			}
-		}
-		if err != nil && !os.IsNotExist(err) {
+	} else if identityError == nil {
+		var err error
+		store, err = configuredRecoverySettingsStore(currentLayout, 0)
+		if err != nil {
 			log.Printf("settings store: %v", err)
 		}
 	}

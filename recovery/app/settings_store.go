@@ -9,6 +9,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 )
 
@@ -26,6 +28,28 @@ type recoverySettings struct {
 type recoverySettingsStore struct {
 	layout runtimeLayout
 	offset int64
+}
+
+// A board can select a shared offset in its network defaults or a separate
+// eMMC-only offset when the same rootfs is used for both eMMC and SPI.
+func configuredRecoverySettingsStore(l runtimeLayout, offset int64) (*recoverySettingsStore, error) {
+	if l.Profile != "emmc" {
+		return nil, nil
+	}
+	if offset == 0 {
+		data, err := os.ReadFile("/etc/rkdev-settings-offset")
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		offset, err = strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return newRecoverySettingsStore(l, offset)
 }
 
 func newRecoverySettingsStore(l runtimeLayout, offset int64) (*recoverySettingsStore, error) {

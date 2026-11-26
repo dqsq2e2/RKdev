@@ -35,19 +35,26 @@ type netRuntime struct {
 }
 
 func (n *netRuntime) portNames() map[string]string {
+	return networkPortNames("/sys/class/net", n.defs.Ports)
+}
+
+func networkPortNames(sysRoot string, ports []networkPort) map[string]string {
 	names := map[string]string{}
-	nodes, _ := os.ReadDir("/sys/class/net")
-	for _, p := range n.defs.Ports {
+	nodes, _ := os.ReadDir(sysRoot)
+	for _, p := range ports {
 		for _, node := range nodes {
 			name := node.Name()
 			if !ifaceName.MatchString(name) {
 				continue
 			}
-			device, err := filepath.EvalSymlinks(filepath.Join("/sys/class/net", name, "device"))
-			if err != nil || !strings.Contains(device+"/", p.Path+"/") {
+			base := filepath.Join(sysRoot, name)
+			device, _ := filepath.EvalSymlinks(filepath.Join(base, "device"))
+			// DSA user ports share a parent device but have distinct OF nodes.
+			ofNode, _ := filepath.EvalSymlinks(filepath.Join(base, "of_node"))
+			if !strings.Contains(device+"/", p.Path+"/") && !strings.Contains(ofNode+"/", p.Path+"/") {
 				continue
 			}
-			kind, valid := hardwareInterfaceType("/sys/class/net", name)
+			kind, valid := hardwareInterfaceType(sysRoot, name)
 			if valid && (kind == "无线") == p.Wireless {
 				if names[p.ID] != "" {
 					delete(names, p.ID) // Never guess between two matching connectors.

@@ -41,15 +41,17 @@ func validateSystemImage(path string) error {
 	return fmt.Errorf("需要包含启动配置的 ext4 或 Btrfs 系统分区镜像")
 }
 
+type releaseImage struct {
+	Name   string `json:"name"`
+	Bytes  int64  `json:"bytes"`
+	SHA256 string `json:"sha256"`
+}
+
 type releaseManifest struct {
-	Schema int           `json:"schema"`
-	Kind   string        `json:"kind"`
-	Layout runtimeLayout `json:"layout"`
-	Image  struct {
-		Name   string `json:"name"`
-		Bytes  int64  `json:"bytes"`
-		SHA256 string `json:"sha256"`
-	} `json:"image"`
+	Schema  int           `json:"schema"`
+	Kind    string        `json:"kind"`
+	Layout  runtimeLayout `json:"layout"`
+	Image   releaseImage  `json:"image"`
 	Extents []struct {
 		region
 		Kind   string `json:"kind"`
@@ -361,13 +363,33 @@ func getRelease(ctx context.Context, link string) (*http.Response, error) {
 	return resp, err
 }
 
-func (l runtimeLayout) fetchRelease(ctx context.Context) (releaseManifest, error) {
+type onlineRelease struct {
+	Version  string
+	Image    releaseImage
+	download string
+	manifest *releaseManifest
+}
+
+func (l runtimeLayout) fetchRelease(ctx context.Context) (onlineRelease, error) {
+	u, err := url.Parse(l.ReleaseURL)
+	if err != nil {
+		return onlineRelease{}, err
+	}
+	if u.Host == "api.github.com" && githubReleasesPath.MatchString(u.Path) {
+		return l.fetchGitHubRelease(ctx, u)
+	}
 	resp, err := getRelease(ctx, l.ReleaseURL)
 	if err != nil {
-		return releaseManifest{}, err
+		return onlineRelease{}, err
 	}
 	defer resp.Body.Close()
-	return readReleaseManifest(resp.Body, l)
+	m, err := readReleaseManifest(resp.Body, l)
+	if err != nil {
+		return onlineRelease{}, err
+	}
+	u.Path = path.Join(path.Dir(u.Path), m.Image.Name)
+	u.RawPath, u.RawQuery, u.Fragment = "", "", ""
+	return onlineRelease{m.Sources.Version, m.Image, u.String(), &m}, nil
 }
 
 type updateStatus struct {
@@ -410,7 +432,7 @@ func handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	jsonOK(w, map[string]any{"version": m.Sources.Version, "image": m.Image, "current": buildTime})
+	jsonOK(w, map[string]any{"version": m.Version, "image": m.Image, "current": buildTime})
 }
 
 func handleUpdateDownload(w http.ResponseWriter, r *http.Request) {
@@ -465,17 +487,14 @@ func (p releaseProgressWriter) Write(b []byte) (int, error) {
 }
 
 func onlineUpgrade(ctx context.Context, l runtimeLayout, confirmedHash string) error {
-	m, err := l.fetchRelease(ctx)
+	source, err := l.fetchRelease(ctx)
 	if err != nil {
 		return err
 	}
-	if m.Image.SHA256 != confirmedHash {
+	if source.Image.SHA256 != confirmedHash {
 		return fmt.Errorf("在线版本已变更，请重新检查")
 	}
-	u, _ := url.Parse(l.ReleaseURL)
-	u.Path = path.Join(path.Dir(u.Path), m.Image.Name)
-	u.RawPath, u.RawQuery, u.Fragment = "", "", ""
-	resp, err := getRelease(ctx, u.String())
+	resp, err := getRelease(ctx, source.download)
 	if err != nil {
 		return err
 	}
@@ -487,16 +506,36 @@ func onlineUpgrade(ctx context.Context, l runtimeLayout, confirmedHash string) e
 	defer os.Remove(f.Name())
 	defer f.Close()
 	onlineUpdate.Lock()
-	onlineUpdate.status.Stage, onlineUpdate.status.Total = "downloading", m.Image.Bytes
+	onlineUpdate.status.Stage, onlineUpdate.status.Total = "downloading", source.Image.Bytes
 	onlineUpdate.Unlock()
-	n, err := io.Copy(releaseProgressWriter{f}, io.LimitReader(resp.Body, m.Image.Bytes+1))
-	if err != nil || n != m.Image.Bytes {
+	digest := sha256.New()
+	n, err := io.Copy(releaseProgressWriter{io.MultiWriter(f, digest)}, io.LimitReader(resp.Body, source.Image.Bytes+1))
+	if err != nil || n != source.Image.Bytes {
 		return fmt.Errorf("下载不完整或镜像大小不匹配: %v", err)
+	}
+	if hex.EncodeToString(digest.Sum(nil)) != confirmedHash {
+		return fmt.Errorf("下载的固件校验失败")
 	}
 	onlineUpdate.Lock()
 	onlineUpdate.status.Stage = "verifying"
 	onlineUpdate.Unlock()
-	if err := validateReleaseImage(f, n, l, m); err != nil {
+	var manifest releaseManifest
+	payload := f
+	if source.manifest != nil {
+		manifest = *source.manifest
+	} else {
+		payload, err = os.CreateTemp("/tmp", "rkdev-image-*")
+		if err != nil {
+			return err
+		}
+		defer os.Remove(payload.Name())
+		defer payload.Close()
+		manifest, n, err = unpackFirmwareZIP(f, n, payload, l, source.Version)
+		if err != nil {
+			return err
+		}
+	}
+	if err := validateReleaseImage(payload, n, l, manifest); err != nil {
 		return err
 	}
 	onlineUpdate.Lock()
@@ -507,7 +546,7 @@ func onlineUpgrade(ctx context.Context, l runtimeLayout, confirmedHash string) e
 	onlineUpdate.cancel = nil
 	onlineUpdate.status.Stage = "writing"
 	onlineUpdate.Unlock()
-	return l.applyRecoveryUpgrade(f)
+	return l.applyRecoveryUpgrade(payload)
 }
 
 func handleUpdateProgress(w http.ResponseWriter, r *http.Request) {

@@ -258,12 +258,14 @@ func startNetworkController() *netController {
 		return nil
 	}
 	n := &netController{defaults: d, active: d.Config, runtime: &netRuntime{defs: d}}
-	if d.Store != 0 && identityError == nil {
-		n.store, err = newRecoverySettingsStore(currentLayout, d.Store)
+	if identityError == nil {
+		n.store, err = configuredRecoverySettingsStore(currentLayout, d.Store)
 		if err != nil {
 			log.Printf("network settings store: %v", err)
-		} else if previous, err := n.store.read(); err == nil && previous.Network != nil && d.validate(*previous.Network) == nil {
-			n.active = *previous.Network
+		} else if n.store != nil {
+			if previous, err := n.store.read(); err == nil && previous.Network != nil && d.validate(*previous.Network) == nil {
+				n.active = *previous.Network
+			}
 		}
 	}
 	go n.start()

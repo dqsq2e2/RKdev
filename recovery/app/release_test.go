@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
 	"encoding/json"
 	"os"
@@ -68,9 +69,11 @@ func TestReleaseProfileAndPayloadValidation(t *testing.T) {
 		}
 		return got
 	}
+	const version, base = "11.26-r7", "fixture-r1-spi-11.26-r7"
 	manifestJSON, err := json.Marshal(map[string]any{
 		"schema": 1, "kind": "recovery-image", "layout": l,
-		"image": map[string]any{"name": "fixture.img", "bytes": l.Capacity, "sha256": sum(region{0, l.Capacity})},
+		"image":   map[string]any{"name": base + ".img", "bytes": l.Capacity, "sha256": sum(region{0, l.Capacity})},
+		"sources": map[string]string{"version": version},
 		"extents": []map[string]any{
 			{"kind": "loader", "offset": l.Loader.Offset, "length": 4, "sha256": sum(region{l.Loader.Offset, 4})},
 			{"kind": "environment", "offset": l.Environment.Offsets[0], "length": l.Environment.Size,
@@ -96,6 +99,34 @@ func TestReleaseProfileAndPayloadValidation(t *testing.T) {
 	if err := validateReleaseImage(bytes.NewReader(img), int64(len(img)), l, m); err != nil {
 		t.Fatal(err)
 	}
+	makeZIP := func(imageName string) *bytes.Reader {
+		t.Helper()
+		var packed bytes.Buffer
+		zw := zip.NewWriter(&packed)
+		for name, data := range map[string][]byte{imageName: img, base + ".json": manifestJSON} {
+			w, err := zw.Create(name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := w.Write(data); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := zw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return bytes.NewReader(packed.Bytes())
+	}
+	packed := makeZIP(base + ".img")
+	var unpacked bytes.Buffer
+	fromZIP, n, err := unpackFirmwareZIP(packed, packed.Size(), &unpacked, l, version)
+	if err != nil || !bytes.Equal(unpacked.Bytes(), img) || fromZIP.Image != m.Image {
+		t.Fatalf("unpack firmware: size=%d manifest=%+v error=%v", n, fromZIP.Image, err)
+	}
+	wrong := makeZIP("another-board.img")
+	if _, _, err := unpackFirmwareZIP(wrong, wrong.Size(), &unpacked, l, version); err == nil {
+		t.Fatal("archive contained an unrelated image")
+	}
 	img[l.Recovery.Offset+1024+104] ^= 1 // corrupt recovery layout UUID
 	if err := validateReleaseImage(bytes.NewReader(img), int64(len(img)), l, m); err == nil {
 		t.Fatal("whole-image damage accepted")
@@ -107,6 +138,35 @@ func TestReleaseProfileAndPayloadValidation(t *testing.T) {
 	m.Extents[2].SHA256 = sum(l.Recovery.region)
 	if err := validateReleaseImage(bytes.NewReader(img), int64(len(img)), l, m); err == nil {
 		t.Fatal("wrong recovery UUID accepted with refreshed image and extent hashes")
+	}
+}
+
+func TestSelectGitHubRelease(t *testing.T) {
+	l := runtimeLayout{BoardID: "fixture", Revision: "v1", Profile: "spi", Capacity: 32 << 20}
+	digest := strings.Repeat("ab", 32)
+	release := func(board, profile, day, version string) githubFirmwareRelease {
+		return githubFirmwareRelease{
+			Tag: board + "-" + profile + "-" + day + "-v" + version,
+			Assets: []githubReleaseAsset{{Name: board + "-v1-" + profile + "-" + version + ".zip", Size: 20 << 20,
+				State: "uploaded", Digest: "sha256:" + digest}},
+		}
+	}
+	draft := release(l.BoardID, l.Profile, "2026", "11.26-r15")
+	draft.Draft = true
+	noHash := release(l.BoardID, l.Profile, "2026", "11.26-r14")
+	noHash.Assets[0].Digest = ""
+	releases := []githubFirmwareRelease{
+		draft, noHash, release(l.BoardID, "emmc", "2026", "11.26-r13"),
+		release("other", l.Profile, "2026", "11.26-r12"), release(l.BoardID, l.Profile, "2025", "12.31-r20"),
+		release(l.BoardID, l.Profile, "2026", "11.26-r9"), release(l.BoardID, l.Profile, "2026", "11.26-r10"),
+	}
+	got, err := selectGitHubRelease(releases, "fixture/boards", l)
+	if err != nil || got.Version != "11.26-r10" || got.Image.SHA256 != digest ||
+		got.download != "https://github.com/fixture/boards/releases/download/fixture-spi-2026-v11.26-r10/fixture-v1-spi-11.26-r10.zip" {
+		t.Fatalf("selected wrong release: %+v, %v", got, err)
+	}
+	if _, err := selectGitHubRelease(releases[:4], "fixture/boards", l); err == nil {
+		t.Fatal("selected a mismatched, draft or unverified release")
 	}
 }
 

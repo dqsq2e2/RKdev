@@ -32,7 +32,7 @@
 | `boot_order`、`system_targets`、`recovery_args` | U-Boot 默认启动设备顺序、Web 允许写入的系统目标（默认同顺序）、恢复内核参数。设备值为 `emmc`、`sd`、`usb`、`nvme`、`sata` |
 | `key` | 可选。 `type: adc` 填 `channel`、`minimum`、`maximum`，或 `type: button` 填 DT 按键 `label`；可填 `samples`、`delay_ms`。 `action` 为 `recovery`、`maskrom` 或 `host-or-recovery`；最后一种另填 `usb_node`，可设 `wait_ms` |
 | `mmc_device`、`sd_device`、`loader_index`、`boot_fallback` | U-Boot 设备号（默认 eMMC 为 0，SD 为 1，Loader 为目标设备号）；本地恢复失败后回到 `console`、进入 `maskrom`，或在 eMMC 模式下进入 `loader` |
-| profile 下的 `firmware`、`release_url` | 可选。前者把固件描述映射到 `/lib/firmware` 相对路径；后者是 HTTPS 上的板型升级清单 |
+| profile 下的 `firmware`、`release_url` | 可选。前者把固件描述映射到 `/lib/firmware` 相对路径；后者是 HTTPS 上的板型升级清单或 GitHub Releases API 地址 |
 | `rkfw` | SPI profile 的可选 Rockchip 原始分区引导：`kernel`、`initrd`、`resource`、`root` 为相应分区号，`args` 是额外的内核参数 |
 
 U-Boot 的启动 Logo、F2 恢复和 F10 引导菜单由 RKdev 提供。板包在 U-Boot 设备树的 VOP 节点用 `u-boot,hdmi` 列出实际连接的 HDMI 发射端，并为各端配置引脚以及所需的使能 GPIO。若板上有限制，可在发射端设置 `u-boot,preferred-vic`（例如 4 为 720p60），仅在显示器声明支持时优先选择该模式。没有可用的 HDMI 显示器时，快捷键和菜单仍可通过串口使用。启用了 USB 主机的板也可用 USB 键盘。
@@ -41,4 +41,4 @@ U-Boot 的启动 Logo、F2 恢复和 F10 引导菜单由 RKdev 提供。板包�
 
 构建器从布局生成 SHA-256 `layout_id`，绑定 `/chosen/rkdev,*`、镜像清单、恢复 ext4 UUID 和默认 `rkdev_layout`。同一个 ID 的兼容更新可替换恢复和引导；偏移或分区规则改变应另做迁移包。环境的 `rkdev_targets` 记录用户启动顺序，可额外用 `recovery` 提前尝试本地恢复；未指定时本地恢复仍是回退项。`rkdev_installing` 由恢复程序在 eMMC 系统安装期间管理。恢复会核对运行中的 DT 身份、目标设备的几何和恢复区标识，才启用该布局的写入功能。
 
-在线清单文件名可以不同于镜像；其 `image.name` 必须是同目录下的 `.img`。离线升级从网页选对应 `.img` 和 `.json`。哈希用于检测不匹配或损坏；在线信任来自板包选定的 HTTPS 发布地址。新增板包应先在非生产介质上验证冷启动、恢复、USB 下载模式和镜像读回，再对外发固件。
+在线清单的 `image.name` 必须是同目录下的 `.img`。设置 `https://api.github.com/repos/<owner>/<repo>/releases` 时，恢复系统按 `<board_id>-<profile>-<year>-v<version>` 查找正式发布，下载 `<board_id>-<revision>-<profile>-<version>.zip`，并核对发布附件哈希及包内的镜像与清单。离线升级从网页选对应 `.img` 和 `.json`；ZIP 应先解压。新增板包应先在非生产介质上验证冷启动、恢复、USB 下载模式和镜像读回，再对外发固件。
