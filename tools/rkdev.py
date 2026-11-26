@@ -336,9 +336,12 @@ def make_payload(args, cfg, data, stage, rootfs, linux, dtb):
     output = stage / "recovery.ext4"
     with output.open("wb") as f:
         f.truncate(data["recovery"]["length"])
+    # The SPI filesystem only holds the kernel, initramfs, DT and boot config.
+    # Keep its inode table small so it does not consume space for firmware.
+    inode_options = ["-N", "128"] if data["profile"] == "spi" else []
     run(["mkfs.ext4", "-q", "-F", "-m", "0", "-L", data["recovery"]["label"],
          "-U", uuid.UUID(hex=data["layout_id"][:32]), "-d", content,
-         "-O", "^has_journal,^metadata_csum,^64bit,^resize_inode", output])
+         "-O", "^has_journal,^metadata_csum,^64bit,^resize_inode", *inode_options, output])
     run(["e2fsck", "-fn", output])
     return output, kernel, content
 
