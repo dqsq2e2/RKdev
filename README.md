@@ -44,7 +44,7 @@ python3 tools/rkdev.py verify --board "$board" --profile emmc \
 - 按键可选恢复、Maskrom 或依据 USB 主机握手分流。没有可用系统时尝试本地恢复，随后按板包的设置进入 Maskrom、RockUSB Loader 或返回串口。Maskrom 属于 BootROM，Loader 由 U-Boot 提供。串口可执行 `rkdevboot recovery`；其他动作取决于板包配置。
 - 在本地网络打开 `http://设备IP/` 进入恢复网页，无需网页账号。网页提供刷写、引导设置、硬件检测、备份与还原、终端、防火墙和恢复更新。SSH、串口与 HDMI 登录由板包定义。
 
-接口与位置定义见 [板包契约](docs/board-package.md)。源码和第三方材料见 [来源记录](SOURCES.md)。
+接口与位置定义见 [板包契约](docs/board-package.md)。
 
 ## 致谢
 
